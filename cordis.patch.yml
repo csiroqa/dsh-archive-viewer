@@ -1,0 +1,27 @@
+# dsh-archive-viewer bundle patch: inserts its plugin row into the profile
+# roster. Install with:
+#   dsh plugin --profile web add link:<this-directory>
+#
+# The single row mounts BOTH halves: the built-in host engine (auto archive,
+# summary snapshots, /rpc channel) and the browser side (archived-session
+# viewer + knowledge library, via the dsh.client declaration in package.json).
+#
+# config 详解（全部可选）：
+#   autoArchiveEnabled  自动定期归档开关（默认 true）
+#   maxIdleDays         会话空闲多少天后自动归档（默认 7）
+#   scanIntervalMinutes 扫描周期分钟数（默认 30）
+#   pinnedSessionIds    永不自动归档的会话 id 列表
+#   summarizeEnabled    自动摘要沉淀经验库开关（默认 true）
+#   provider / model    摘要模型路由（与 DSH 的 LLM 配置一致；
+#                       未配置时「生成摘要」按钮会报错提示）
+#   maxInputBytes       摘要输入字节上限（默认 65536）
+#   maxOutputTokens     摘要输出 token 上限（默认 1024）
+#   timeoutMs           摘要请求超时毫秒（默认 60000）
+- insert:
+    - id: archive-viewer
+      name: '@dsh-external/dsh-archive-viewer'
+      config:
+        autoArchiveEnabled: true
+        maxIdleDays: 7
+        scanIntervalMinutes: 30
+        summarizeEnabled: true

@@ -1,0 +1,1364 @@
+/**
+ * ArchivePanelView — 已归档会话查看面板（渲染在 sidebar.footer.action 注册项的
+ * fixed 层叠内，样式全部走 --dsw-alias-* 令牌以跟随皮肤）。
+ *
+ * 信息架构（对标 Voyager 文件夹归档）：
+ *  - 左栏：文件夹树 ——「全部归档」根 / 用户自定义文件夹 / 「未分类」（不在任何
+ *    文件夹的归档会话）/「经验库」（LLM 沉淀的知识卡片）。文件夹可新建、重命名、
+ *    删除、把会话移入/移出。
+ *  - 右栏：时间线卡片流 —— 归档会话按更新时间倒序排列，卡片带勾选（批量操作）、
+ *    摘要预览、对话查看、ZIP 导出、恢复会话。
+ *  - 底部批量操作条：勾选 ≥1 项时出现，支持批量导出 / 生成摘要 / 恢复 / 移动。
+ *
+ * 数据源（只读 store + RPC）：
+ *  - stores.workspaces.snapshot：注册表全局归档集合 archivedSessionIds + 工作区
+ *  - stores.sessions.snapshot：全部会话行（归档不删日志，仍在 session.list）
+ *  - stores.connection.api.sessions.history：按页读取会话事件
+ *  - connection.rpc.call('/rpc', 'archive.folder.*')：文件夹 CRUD + 会话归属
+ *  - connection.rpc.call('/rpc', 'archive.summary.*')：经验库快照读写
+ *  - GET /api/session.export：宿主侧 ZIP 导出
+ */
+import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { loadDeletedIds, recordDeletedIds } from './deletedIds.ts'
+import type {
+  ArchiveFolder, ArchiveRowInfo, ArchiveSnapshot, ArchiveStores, BookmarkEntry, BookmarkPayload,
+  ConnectionHandle, FolderPayload, HistoryEntry, RpcResult, SessionEvent, SessionId,
+} from './types.ts'
+
+/** 历史一页的消息数（chunk/tool 事件随消息成组返回，20 条消息已是一大页）。 */
+const PAGE_SIZE = 20
+
+/** 侧边栏行内只渲染这两类事件（其余如 turn/start、tool/call 等跳过）。 */
+const CHAT_TYPES = new Set(['user/message', 'assistant/message'])
+
+/** store 适配器：useSyncExternalStore 直接消费 SnapshotStore。 */
+function subscribeOf<T>(store: { subscribe(listener: () => void): () => void }): (listener: () => void) => () => void {
+  return listener => store.subscribe(listener)
+}
+function snapshotOf<T>(store: { getSnapshot(): T }): () => T {
+  return () => store.getSnapshot()
+}
+
+/** 会话 id → 工作区标题（用于行内归属提示）。 */
+function workspaceTitlesOf(items: readonly { sessionIds: readonly string[]; title: string }[]): ReadonlyMap<string, string> {
+  const map = new Map<string, string>()
+  for (const item of items) {
+    for (const id of item.sessionIds) if (!map.has(id)) map.set(id, item.title)
+  }
+  return map
+}
+
+/** 从事件数据提取可读文本。 */
+function textOf(event: SessionEvent): string {
+  const data = event.data
+  if (data.text !== undefined && data.text !== '') return data.text
+  const parts: string[] = []
+  for (const block of data.content ?? []) {
+    if (block.type === 'text') {
+      if (block.text !== '') parts.push(block.text)
+    } else {
+      parts.push(`[${block.type}]`)
+    }
+  }
+  return parts.join('\n')
+}
+
+/** 时间戳 → 本地化字符串。 */
+function formatTime(time: number): string {
+  try {
+    return new Date(time).toLocaleString()
+  } catch {
+    return String(time)
+  }
+}
+
+/** 干净的下载文件名（宿主端点约定的 id 清理规则）。 */
+function zipFilename(sessionId: string): string {
+  return `dsh-session-${sessionId.replace(/[^A-Za-z0-9_-]/g, '_')}.zip`
+}
+
+/** 触发宿主 ZIP 导出下载（HEAD 预检 + 原生下载锚点，与官方下载逻辑一致）。 */
+async function downloadLogZip(sessionId: string): Promise<void> {
+  const origin = globalThis.location?.origin
+  const url = new URL('/api/session.export', origin !== undefined && origin !== 'null' ? origin : 'http://dsh.internal')
+  url.searchParams.set('sessionId', sessionId)
+  url.searchParams.set('includeDescendants', 'true')
+  const response = await fetch(url, { method: 'HEAD' })
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '')
+    throw new Error(`HTTP ${response.status}${detail === '' ? '' : ` ${detail}`}`)
+  }
+  const anchor = document.createElement('a')
+  anchor.href = url.toString()
+  anchor.download = zipFilename(sessionId)
+  anchor.click()
+}
+
+/** 触发宿主取消归档（workspace.unarchiveSession RPC，RPC 信封与官方客户端一致）。 */
+async function unarchiveSessionRpc(sessionId: string): Promise<void> {
+  const origin = globalThis.location?.origin
+  const response = await fetch(
+    new URL('/api/workspace.unarchiveSession', origin !== undefined && origin !== 'null' ? origin : 'http://dsh.internal'),
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        type: 'client-request',
+        rpcId: crypto.randomUUID(),
+        method: 'workspace.unarchiveSession',
+        payload: { sessionId },
+      }),
+    },
+  )
+  if (!response.ok) throw new Error(`HTTP ${response.status}`)
+  const envelope = (await response.json()) as {
+    result?: { ok?: boolean; error?: { message?: string } }
+  }
+  if (envelope.result?.ok !== true) {
+    throw new Error(envelope.result?.error?.message ?? '未知错误')
+  }
+}
+
+/** 经通用 RPC 信道读取归档快照（经验库）列表。 */
+async function listSummariesRpc(connection: ConnectionHandle): Promise<readonly ArchiveSnapshot[]> {
+  // 必须显式传空 payload：client 的 JSON.stringify 会丢弃 undefined，
+  // 而 host 的 clientRequestSchema 要求 payload 字段存在。
+  const result = await connection.rpc.call('/rpc', 'archive.summary.list', {})
+  if (!result.ok) throw new Error(result.error?.message ?? '读取经验库失败')
+  return (result.value as { sessionId: string; title: string; archivedAt: number; summaryMarkdown: string; summary: ArchiveSnapshot['summary'] }[] ?? [])
+    .map((value, index) => ({
+      sessionId: String(value.sessionId),
+      title: String(value.title ?? ''),
+      archivedAt: Number(value.archivedAt ?? 0),
+      summaryMarkdown: String(value.summaryMarkdown ?? ''),
+      summary: {
+        goal: String(value.summary?.goal ?? ''),
+        decisions: Array.isArray(value.summary?.decisions) ? value.summary!.decisions.map(String) : [],
+        outcomes: Array.isArray(value.summary?.outcomes) ? value.summary!.outcomes.map(String) : [],
+        lessons: Array.isArray(value.summary?.lessons) ? value.summary!.lessons.map(String) : [],
+        openQuestions: Array.isArray(value.summary?.openQuestions) ? value.summary!.openQuestions.map(String) : [],
+      },
+    }))
+}
+
+/** 经通用 RPC 信道读取单个会话的快照（不存在或强制刷新时请求生成）。 */
+async function readSummaryRpc(connection: ConnectionHandle, sessionId: string, refresh: boolean): Promise<ArchiveSnapshot | null> {
+  const result: RpcResult =
+    refresh
+      ? await connection.rpc.call('/rpc', 'archive.summary.refresh', { sessionId })
+      : await connection.rpc.call('/rpc', 'archive.summary.get', { sessionId })
+  if (!result.ok) {
+    throw new Error(result.error?.message ?? '读取摘要失败')
+  }
+  // 无快照是正常业务状态：host 返回 ok(null)。
+  if (result.value === null || result.value === undefined) return null
+  const value = result.value as { sessionId: string; title: string; archivedAt: number; summaryMarkdown: string; summary: ArchiveSnapshot['summary'] }
+  return {
+    sessionId: String(value.sessionId),
+    title: String(value.title ?? ''),
+    archivedAt: Number(value.archivedAt ?? 0),
+    summaryMarkdown: String(value.summaryMarkdown ?? ''),
+    summary: {
+      goal: String(value.summary?.goal ?? ''),
+      decisions: Array.isArray(value.summary?.decisions) ? value.summary!.decisions.map(String) : [],
+      outcomes: Array.isArray(value.summary?.outcomes) ? value.summary!.outcomes.map(String) : [],
+      lessons: Array.isArray(value.summary?.lessons) ? value.summary!.lessons.map(String) : [],
+      openQuestions: Array.isArray(value.summary?.openQuestions) ? value.summary!.openQuestions.map(String) : [],
+    },
+  }
+}
+
+/** 文件夹 RPC：list / create / rename / remove / move，返回统一 FolderPayload。 */
+async function folderRpc(
+  connection: ConnectionHandle,
+  action: 'list' | 'create' | 'rename' | 'remove' | 'move',
+  params?: { name?: string; folderId?: string; sessionId?: string; folderId2?: string },
+): Promise<FolderPayload> {
+  const endpoint = `archive.folder.${action}`
+  const payload: Record<string, unknown> = {}
+  if (params?.name !== undefined) payload.name = params.name
+  if (params?.folderId !== undefined) payload.folderId = params.folderId
+  if (params?.sessionId !== undefined) payload.sessionId = params.sessionId
+  if (action === 'move' && params?.folderId2 !== undefined) payload.folderId = params.folderId2
+  const result: RpcResult = await connection.rpc.call('/rpc', endpoint, payload)
+  if (!result.ok) throw new Error(result.error?.message ?? `文件夹操作失败（${action}）`)
+  const value = result.value as { folders?: unknown; assignment?: unknown; created?: unknown }
+  return {
+    folders: Array.isArray(value?.folders)
+      ? value.folders.map(folder => ({ id: String((folder as { id?: unknown })?.id ?? ''), name: String((folder as { name?: unknown })?.name ?? '') }))
+      : [],
+    assignment: (value?.assignment ?? {}) as Readonly<Record<string, string>>,
+    created: (value?.created as ArchiveFolder | undefined) ?? undefined,
+  }
+}
+
+/** 书签 RPC：list / toggle / note，返回统一 BookmarkPayload。 */
+async function bookmarkRpc(
+  connection: ConnectionHandle,
+  action: 'list' | 'toggle' | 'note',
+  params?: { sessionId?: string; note?: string },
+): Promise<BookmarkPayload> {
+  const result: RpcResult = await connection.rpc.call('/rpc', `bookmark.${action}`, {
+    ...(params?.sessionId !== undefined ? { sessionId: params.sessionId } : {}),
+    ...(params?.note !== undefined ? { note: params.note } : {}),
+  })
+  if (!result.ok) throw new Error(result.error?.message ?? `书签操作失败（${action}）`)
+  const value = result.value as { bookmarks?: unknown; updated?: unknown }
+  return {
+    bookmarks: Array.isArray(value?.bookmarks)
+      ? value.bookmarks.map(entry => ({
+        sessionId: String((entry as { sessionId?: unknown })?.sessionId ?? ''),
+        bookmarked: (entry as { bookmarked?: unknown })?.bookmarked === true,
+        note: String((entry as { note?: unknown })?.note ?? ''),
+        updatedAt: Number((entry as { updatedAt?: unknown })?.updatedAt ?? 0),
+      }))
+      : [],
+    updated: (value?.updated as BookmarkEntry | null | undefined) ?? null,
+  }
+}
+
+/** 删除会话（host 半区文件级清理：日志 + 快照 + 书签 + 文件夹归属）。 */
+async function deleteSessionRpc(connection: ConnectionHandle, sessionId: string): Promise<void> {
+  const result: RpcResult = await connection.rpc.call('/rpc', 'archive.session.delete', { sessionId })
+  if (!result.ok) throw new Error(result.error?.message ?? '删除会话失败')
+}
+
+/** 复制会话 id（剪贴板 API + 兜底 execCommand）。 */
+async function copySessionId(id: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(id)
+    return
+  } catch {
+    // 非安全上下文等场景走兜底
+  }
+  const textarea = document.createElement('textarea')
+  textarea.value = id
+  textarea.style.position = 'fixed'
+  textarea.style.opacity = '0'
+  document.body.appendChild(textarea)
+  textarea.select()
+  try {
+    document.execCommand('copy')
+  } finally {
+    textarea.remove()
+  }
+}
+
+/** 一行会话的对话日志加载器（尾部一页 + 向前翻页）。 */
+function useSessionLog(
+  connection: ConnectionHandle | undefined,
+  sessionId: SessionId,
+  enabled: boolean,
+): {
+  events: HistoryEntry[]
+  hasMore: boolean
+  loading: boolean
+  error: string | null
+  loadOlder(): void
+} {
+  const [events, setEvents] = useState<HistoryEntry[]>([])
+  const [hasMore, setHasMore] = useState(false)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const fetchPage = useCallback(async (beforeSeq: number | undefined): Promise<{ events: HistoryEntry[]; hasMore: boolean } | null> => {
+    if (connection === undefined) {
+      setError('connection 服务不可用')
+      return null
+    }
+    try {
+      const response = await connection.api.sessions.history({
+        sessionId,
+        ...(beforeSeq === undefined ? {} : { beforeSeq }),
+        maxMessages: PAGE_SIZE,
+      })
+      if (!response.result.ok) {
+        setError(`读取失败：${response.result.error?.message ?? '未知错误'}`)
+        return null
+      }
+      return {
+        events: response.result.value?.events ?? [],
+        hasMore: response.result.value?.hasMore ?? false,
+      }
+    } catch (cause) {
+      setError(`读取失败：${cause instanceof Error ? cause.message : String(cause)}`)
+      return null
+    }
+  }, [connection, sessionId])
+
+  useEffect(() => {
+    if (!enabled) return
+    let cancelled = false
+    setLoading(true)
+    setError(null)
+    void fetchPage(undefined).then((page) => {
+      if (cancelled) return
+      // 失败路径也必须复位 loading，否则「正在读取对话…」永远转圈且无法重试。
+      if (page !== null) {
+        setEvents(page.events)
+        setHasMore(page.hasMore)
+      }
+      setLoading(false)
+    })
+    return () => { cancelled = true }
+  }, [enabled, fetchPage])
+
+  const loadOlder = useCallback(() => {
+    if (loading || events.length === 0) return
+    const beforeSeq = events[0]?.event.seq
+    if (beforeSeq === undefined) return
+    setLoading(true)
+    void fetchPage(beforeSeq).then((page) => {
+      if (page === null) {
+        setLoading(false)
+        return
+      }
+      setEvents(prev => [...page.events, ...prev])
+      setHasMore(page.hasMore)
+      setLoading(false)
+    })
+  }, [loading, events, fetchPage])
+
+  return { events, hasMore, loading, error, loadOlder }
+}
+
+/** 摘要卡片：把快照渲染成 Voyager 式沉淀卡片（目标 + 决策 + 经验列表）。 */
+function SummaryCard(props: {
+  snapshot: ArchiveSnapshot
+  sessionTitle: string
+  onRefresh(sessionId: string): void
+  refreshing: boolean
+}): JSX.Element {
+  const { snapshot, sessionTitle, onRefresh, refreshing } = props
+  const [expanded, setExpanded] = useState(false)
+  const summary = snapshot.summary
+  const empty = summary.goal === '' && summary.decisions.length === 0
+    && summary.outcomes.length === 0 && summary.lessons.length === 0
+    && summary.openQuestions.length === 0
+
+  const items = (label: string, values: readonly string[]): JSX.Element | null =>
+    values.length === 0 ? null : (
+      <div className="dsh-av-sm-item">
+        <span className="dsh-av-sm-label">{label}</span>
+        <ul className="dsh-av-sm-list">
+          {values.map((value, index) => <li key={index}>{value}</li>)}
+        </ul>
+      </div>
+    )
+
+  return (
+    <div className="dsh-av-sm" data-expanded={expanded || undefined}>
+      <div className="dsh-av-sm-head">
+        <span className="dsh-av-sm-goal" title={summary.goal}>
+          {empty
+            ? `「${sessionTitle}」暂无摘要沉淀`
+            : (summary.goal !== '' ? summary.goal : sessionTitle)}
+        </span>
+        <span className="dsh-av-sm-time">归档于 {formatTime(snapshot.archivedAt)}</span>
+      </div>
+      {!empty && (
+        <div className="dsh-av-sm-body">
+          {items('关键决策', summary.decisions)}
+          {items('产出', summary.outcomes)}
+          {items('可复用经验', summary.lessons)}
+          {items('遗留问题', summary.openQuestions)}
+        </div>
+      )}
+      <div className="dsh-av-sm-actions">
+        {!empty && (
+          <button type="button" className="dsh-av-btn dsh-av-btn-sm" onClick={() => setExpanded(v => !v)}>
+            {expanded ? '收起' : '展开 Markdown'}
+          </button>
+        )}
+        <button
+          type="button"
+          className="dsh-av-btn dsh-av-btn-sm"
+          disabled={refreshing}
+          onClick={() => onRefresh(snapshot.sessionId)}
+        >
+          {refreshing ? '生成中…' : empty ? '生成摘要' : '重新生成'}
+        </button>
+      </div>
+      {expanded && !empty && (
+        <pre className="dsh-av-sm-md">{snapshot.summaryMarkdown}</pre>
+      )}
+    </div>
+  )
+}
+
+/** 经验库视图：全部沉淀快照 + 关键词搜索。 */
+function KnowledgeLibrary(props: {
+  connection: ConnectionHandle
+  onNotice(text: string, kind?: 'error'): void
+}): JSX.Element {
+  const { connection, onNotice } = props
+  const [snapshots, setSnapshots] = useState<readonly ArchiveSnapshot[]>([])
+  const [loading, setLoading] = useState(true)
+  const [refreshing, setRefreshing] = useState<string | null>(null)
+  const [query, setQuery] = useState('')
+
+  // ref 稳定化：onNotice 每次渲染可能换引用，直接进依赖会让 load 不稳定 → 重发 RPC。
+  const onNoticeRef = useRef(onNotice)
+  useEffect(() => { onNoticeRef.current = onNotice })
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      setSnapshots(await listSummariesRpc(connection))
+    } catch (cause) {
+      onNoticeRef.current(`读取经验库失败：${cause instanceof Error ? cause.message : String(cause)}`, 'error')
+    } finally {
+      setLoading(false)
+    }
+  }, [connection])
+
+  useEffect(() => { void load() }, [load])
+
+  const refreshOne = useCallback(async (sessionId: string) => {
+    setRefreshing(sessionId)
+    try {
+      await readSummaryRpc(connection, sessionId, true)
+      await load()
+    } catch (cause) {
+      onNoticeRef.current(`摘要生成失败：${cause instanceof Error ? cause.message : String(cause)}`, 'error')
+    } finally {
+      setRefreshing(null)
+    }
+  }, [connection, load])
+
+  const filtered = useMemo(() => {
+    const needle = query.trim().toLowerCase()
+    if (needle === '') return snapshots
+    return snapshots.filter(snapshot =>
+      snapshot.title.toLowerCase().includes(needle)
+      || snapshot.summary.goal.toLowerCase().includes(needle)
+      || snapshot.summary.decisions.some(v => v.toLowerCase().includes(needle))
+      || snapshot.summary.outcomes.some(v => v.toLowerCase().includes(needle))
+      || snapshot.summary.lessons.some(v => v.toLowerCase().includes(needle))
+      || snapshot.summary.openQuestions.some(v => v.toLowerCase().includes(needle))
+      || snapshot.summaryMarkdown.toLowerCase().includes(needle),
+    )
+  }, [snapshots, query])
+
+  return (
+    <div className="dsh-av-library">
+      <div className="dsh-av-library-toolbar">
+        <input
+          type="search"
+          className="dsh-av-search"
+          placeholder="搜索目标 / 决策 / 经验…"
+          value={query}
+          onChange={event => setQuery(event.target.value)}
+        />
+        <button type="button" className="dsh-av-btn" disabled={loading} onClick={() => void load()}>
+          {loading ? '加载中…' : '刷新'}
+        </button>
+      </div>
+      <div className="dsh-av-sm-list-wrap">
+        {loading && <div className="dsh-av-empty">正在读取经验库…</div>}
+        {!loading && snapshots.length === 0 && (
+          <div className="dsh-av-empty">
+            还没有摘要沉淀。归档会话点「生成摘要」即可沉淀（需要配置 provider/model，见 README）。
+          </div>
+        )}
+        {!loading && snapshots.length > 0 && filtered.length === 0 && (
+          <div className="dsh-av-empty">没有匹配「{query}」的沉淀条目</div>
+        )}
+        {filtered.map(snapshot => (
+          <SummaryCard
+            key={snapshot.sessionId}
+            snapshot={snapshot}
+            sessionTitle={snapshot.title !== '' ? snapshot.title : snapshot.sessionId}
+            onRefresh={refreshOne}
+            refreshing={refreshing === snapshot.sessionId}
+          />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/** 文件夹树状态：folders + assignment + 操作 helper 的封装。 */
+function useFolderState(connection: ConnectionHandle | undefined, onError: (text: string) => void): {
+  folders: readonly ArchiveFolder[]
+  assignment: Readonly<Record<string, string>>
+  loading: boolean
+  reload(): Promise<void>
+  createFolder(name: string): Promise<void>
+  renameFolder(folderId: string, name: string): Promise<void>
+  removeFolder(folderId: string): Promise<void>
+  moveSession(sessionId: string, folderId: string | undefined): Promise<void>
+} {
+  const [folders, setFolders] = useState<readonly ArchiveFolder[]>([])
+  const [assignment, setAssignment] = useState<Readonly<Record<string, string>>>({})
+  const [loading, setLoading] = useState(true)
+
+  // ref 稳定化：onError 每次渲染可能换引用，直接进依赖会让 apply/reload 不稳定 → 重发 RPC。
+  const onErrorRef = useRef(onError)
+  useEffect(() => { onErrorRef.current = onError })
+
+  const apply = useCallback(async (action: 'list' | 'create' | 'rename' | 'remove' | 'move', params?: { name?: string; folderId?: string; sessionId?: string; folderId2?: string }) => {
+    if (connection === undefined) {
+      onErrorRef.current('归档数据服务未连接，部分功能不可用')
+      return
+    }
+    const payload = await folderRpc(connection, action, params)
+    setFolders(payload.folders)
+    setAssignment(payload.assignment)
+  }, [connection])
+
+  // reload 抛错：初始 effect 与手动刷新（onRefresh）共用，失败由调用方处理。
+  const reload = useCallback(async () => {
+    setLoading(true)
+    try {
+      await apply('list')
+    } finally {
+      setLoading(false)
+    }
+  }, [apply])
+
+  useEffect(() => {
+    void reload().catch(cause => {
+      onErrorRef.current(`读取文件夹失败：${cause instanceof Error ? cause.message : String(cause)}`)
+    })
+  }, [reload])
+
+  const createFolder = useCallback(async (name: string) => {
+    try { await apply('create', { name }) } catch (cause) {
+      onErrorRef.current(`新建文件夹失败：${cause instanceof Error ? cause.message : String(cause)}`)
+    }
+  }, [apply])
+
+  const renameFolder = useCallback(async (folderId: string, name: string) => {
+    try { await apply('rename', { folderId, name }) } catch (cause) {
+      onErrorRef.current(`重命名失败：${cause instanceof Error ? cause.message : String(cause)}`)
+    }
+  }, [apply])
+
+  const removeFolder = useCallback(async (folderId: string) => {
+    try { await apply('remove', { folderId }) } catch (cause) {
+      onErrorRef.current(`删除失败：${cause instanceof Error ? cause.message : String(cause)}`)
+    }
+  }, [apply])
+
+  // 抛错而非吞错：批量移动需要真实失败计数（吞错会让 batchMove 恒报成功）。
+  const moveSession = useCallback(async (sessionId: string, folderId: string | undefined) => {
+    await apply('move', { sessionId, folderId2: folderId ?? '' })
+  }, [apply])
+
+  return { folders, assignment, loading, reload, createFolder, renameFolder, removeFolder, moveSession }
+}
+
+/** 书签状态：bookmarks + toggle/setNote + 依 sessionId 的查询表。 */
+function useBookmarkState(connection: ConnectionHandle | undefined, onError: (text: string) => void): {
+  bookmarks: readonly BookmarkEntry[]
+  bySession: Readonly<Record<string, BookmarkEntry>>
+  reload(): Promise<void>
+  toggle(sessionId: string): Promise<void>
+  setNote(sessionId: string, note: string): Promise<void>
+} {
+  const [bookmarks, setBookmarks] = useState<readonly BookmarkEntry[]>([])
+
+  // ref 稳定化：onError 每次渲染可能换引用，直接进依赖会让 apply/effect 不稳定 → 重发 RPC。
+  const onErrorRef = useRef(onError)
+  useEffect(() => { onErrorRef.current = onError })
+
+  const apply = useCallback(async (action: 'list' | 'toggle' | 'note', params?: { sessionId?: string; note?: string }) => {
+    if (connection === undefined) {
+      onErrorRef.current('归档数据服务未连接，部分功能不可用')
+      return
+    }
+    const payload = await bookmarkRpc(connection, action, params)
+    setBookmarks(payload.bookmarks)
+  }, [connection])
+
+  // reload 抛错：初始 effect 与手动刷新（onRefresh）共用，失败由调用方处理。
+  const reload = useCallback(async () => {
+    if (connection === undefined) throw new Error('归档数据服务未连接')
+    const payload = await bookmarkRpc(connection, 'list')
+    setBookmarks(payload.bookmarks)
+  }, [connection])
+
+  useEffect(() => {
+    void reload().catch(cause => {
+      onErrorRef.current(`读取收藏失败：${cause instanceof Error ? cause.message : String(cause)}`)
+    })
+  }, [reload])
+
+  const bySession = useMemo(() => {
+    const map: Record<string, BookmarkEntry> = {}
+    for (const entry of bookmarks) map[entry.sessionId] = entry
+    return map
+  }, [bookmarks])
+
+  const toggle = useCallback(async (sessionId: string) => {
+    try { await apply('toggle', { sessionId }) } catch (cause) {
+      onErrorRef.current(`收藏操作失败：${cause instanceof Error ? cause.message : String(cause)}`)
+    }
+  }, [apply])
+
+  const setNote = useCallback(async (sessionId: string, note: string) => {
+    try { await apply('note', { sessionId, note }) } catch (cause) {
+      onErrorRef.current(`便签保存失败：${cause instanceof Error ? cause.message : String(cause)}`)
+    }
+  }, [apply])
+
+  return { bookmarks, bySession, reload, toggle, setNote }
+}
+
+/** 左栏文件夹树。 */
+function FolderTree(props: {
+  folders: readonly ArchiveFolder[]
+  assignment: Readonly<Record<string, string>>
+  archivedIds: readonly string[]
+  totalCount: number
+  bookmarkCount: number
+  selected: string
+  onSelect(key: string): void
+  onCreate(name: string): void
+  onRename(folderId: string, name: string): void
+  onRemove(folderId: string): void
+  libraryCount: number
+}): JSX.Element {
+  const { folders, totalCount, selected, onSelect, onCreate, onRename, onRemove, libraryCount, bookmarkCount, archivedIds } = props
+  // 计数只统计仍处于归档态的会话：assignment 可能残留已恢复会话的条目。
+  const archivedSet = new Set(archivedIds)
+  const countedIds = Object.keys(props.assignment).filter(id => archivedSet.has(id))
+  const unclassified = totalCount - countedIds.length
+  const folderCount = (folderId: string): number => countedIds.filter(id => props.assignment[id] === folderId).length
+  const [creating, setCreating] = useState(false)
+  const [draft, setDraft] = useState('')
+  const [editing, setEditing] = useState<string | null>(null)
+  const [editText, setEditText] = useState('')
+
+  const commitCreate = (): void => {
+    const name = draft.trim()
+    if (name !== '') onCreate(name)
+    setDraft('')
+    setCreating(false)
+  }
+
+  const commitRename = (folderId: string): void => {
+    const name = editText.trim()
+    if (name !== '') onRename(folderId, name)
+    setEditing(null)
+    setEditText('')
+  }
+
+  const item = (key: string, label: string, count: number, indent = false): JSX.Element => (
+    <button
+      type="button"
+      className="dsh-av-tree-item"
+      data-active={selected === key || undefined}
+      data-indent={indent || undefined}
+      onClick={() => onSelect(key)}
+    >
+      <span className="dsh-av-tree-icon">{indent ? '▸' : '▾'}</span>
+      <span className="dsh-av-tree-label">{label}</span>
+      <span className="dsh-av-tree-count">{count}</span>
+    </button>
+  )
+
+  return (
+    <div className="dsh-av-tree">
+      <div className="dsh-av-tree-title">文件夹</div>
+      <div className="dsh-av-tree-scroll">
+        {item('all', '全部归档', totalCount)}
+        {item('bookmarks', '收藏', bookmarkCount)}
+        {folders.map(folder => (
+          <div key={folder.id} className="dsh-av-tree-node" data-active={selected === `folder:${folder.id}` || undefined}>
+            {editing === folder.id
+              ? (
+                <input
+                  autoFocus
+                  className="dsh-av-tree-edit"
+                  value={editText}
+                  onChange={event => setEditText(event.target.value)}
+                  onBlur={() => commitRename(folder.id)}
+                  onKeyDown={event => { if (event.key === 'Enter') commitRename(folder.id); if (event.key === 'Escape') { setEditing(null); setEditText('') } }}
+                />
+              )
+              : (
+                <>
+                  <button
+                    type="button"
+                    className="dsh-av-tree-item"
+                    data-active={selected === `folder:${folder.id}` || undefined}
+                    data-indent
+                    onClick={() => onSelect(`folder:${folder.id}`)}
+                  >
+                    <span className="dsh-av-tree-icon">▸</span>
+                    <span className="dsh-av-tree-label">{folder.name}</span>
+                    <span className="dsh-av-tree-count">
+                      {folderCount(folder.id)}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    className="dsh-av-tree-mini"
+                    title="重命名"
+                    onClick={() => { setEditing(folder.id); setEditText(folder.name) }}
+                  >
+                    ✎
+                  </button>
+                  <button
+                    type="button"
+                    className="dsh-av-tree-mini dsh-av-tree-mini-del"
+                    title="删除文件夹（会话回到未分类）"
+                    onClick={() => { if (window.confirm(`删除文件夹「${folder.name}」？会话将回到「未分类」。`)) onRemove(folder.id) }}
+                  >
+                    ✕
+                  </button>
+                </>
+              )}
+          </div>
+        ))}
+        {item('unclassified', '未分类', Math.max(0, unclassified), true)}
+        {item('library', '经验库', libraryCount)}
+      </div>
+      <div className="dsh-av-tree-foot">
+        {creating
+          ? (
+            <input
+              autoFocus
+              className="dsh-av-tree-edit"
+              placeholder="文件夹名称"
+              value={draft}
+              onChange={event => setDraft(event.target.value)}
+              onBlur={() => { commitCreate() }}
+              onKeyDown={event => { if (event.key === 'Enter') commitCreate(); if (event.key === 'Escape') { setDraft(''); setCreating(false) } }}
+            />
+          )
+          : (
+            <button type="button" className="dsh-av-tree-new" onClick={() => setCreating(true)}>＋ 新建文件夹</button>
+          )}
+      </div>
+    </div>
+  )
+}
+
+/** 右栏完整会话卡片（含摘要预览 + 对话查看 + 收藏/便签 + 行内操作）。 */
+const ArchiveRow = memo(function ArchiveRow(props: {
+  connection: ConnectionHandle | undefined
+  row: ArchiveRowInfo
+  checked: boolean
+  onToggleChecked(): void
+  onMoveTo(folderId: string | undefined): void
+  folders: readonly ArchiveFolder[]
+  bookmark: BookmarkEntry | undefined
+  onToggleBookmark(sessionId: SessionId): void
+  onSaveNote(sessionId: SessionId, note: string): void
+  onNotice(sessionId: SessionId, text: string, kind?: 'error'): void
+  onUnarchive(sessionId: SessionId): Promise<void>
+  onDelete(sessionId: SessionId): Promise<void>
+}): JSX.Element {
+  const { connection, row, checked, onToggleChecked, onMoveTo, folders, bookmark, onToggleBookmark, onSaveNote, onNotice, onUnarchive, onDelete } = props
+  const { id: sessionId, title, meta, workspace } = row
+  const [open, setOpen] = useState(false)
+  const [busyAction, setBusyAction] = useState<string | null>(null)
+  const [summary, setSummary] = useState<ArchiveSnapshot | null>(null)
+  const [summaryLoading, setSummaryLoading] = useState(false)
+  const [noteOpen, setNoteOpen] = useState(false)
+  const [noteDraft, setNoteDraft] = useState(bookmark?.note ?? '')
+  const log = useSessionLog(connection, sessionId, open)
+
+  const commitNote = useCallback(() => {
+    setNoteOpen(false)
+    const trimmed = noteDraft.trim()
+    // 两侧都 trim 后比较，避免「只删了尾部空格」被误判为未修改。
+    if (trimmed === (bookmark?.note ?? '').trim()) return
+    onSaveNote(sessionId, trimmed)
+  }, [noteDraft, bookmark, onSaveNote, sessionId])
+
+  const loadSummary = useCallback(async (refresh: boolean) => {
+    if (connection === undefined) return
+    setSummaryLoading(true)
+    try {
+      const snapshot = await readSummaryRpc(connection, sessionId, refresh)
+      setSummary(snapshot)
+      if (snapshot !== null) onNotice(sessionId, '摘要已就绪')
+    } catch (cause) {
+      onNotice(sessionId, `摘要操作失败：${cause instanceof Error ? cause.message : String(cause)}`, 'error')
+    } finally {
+      setSummaryLoading(false)
+    }
+  }, [connection, sessionId, onNotice])
+
+  const runAction = useCallback(async (kind: 'download' | 'copy' | 'unarchive' | 'delete') => {
+    setBusyAction(kind)
+    try {
+      if (kind === 'download') {
+        await downloadLogZip(sessionId)
+        onNotice(sessionId, '已开始下载日志 ZIP')
+      } else if (kind === 'copy') {
+        await copySessionId(sessionId)
+        onNotice(sessionId, '会话 ID 已复制')
+      } else if (kind === 'delete') {
+        await onDelete(sessionId)
+      } else {
+        await onUnarchive(sessionId)
+      }
+    } catch (cause) {
+      onNotice(sessionId, `操作失败：${cause instanceof Error ? cause.message : String(cause)}`, 'error')
+    } finally {
+      setBusyAction(null)
+    }
+  }, [sessionId, onNotice, onUnarchive, onDelete])
+
+  return (
+    <div className="dsh-av-row" data-checked={checked || undefined}>
+      <div className="dsh-av-row-head">
+        <label className="dsh-av-check">
+          <input type="checkbox" checked={checked} onChange={onToggleChecked} aria-label={`选择会话「${title}」`} />
+          <span />
+        </label>
+        <span className="dsh-av-row-title" title={sessionId}>{title}</span>
+        {workspace !== undefined && <span className="dsh-av-badge">{workspace}</span>}
+        <span className="dsh-av-row-meta">{meta}</span>
+      </div>
+      <div className="dsh-av-actions">
+        <button type="button" className="dsh-av-btn" onClick={() => setOpen(v => !v)}>
+          {open ? '收起对话' : '查看对话'}
+        </button>
+        <button
+          type="button"
+          className="dsh-av-btn"
+          disabled={summaryLoading || busyAction !== null}
+          onClick={() => void loadSummary(true)}
+        >
+          {summaryLoading ? '生成中…' : summary === null ? '生成摘要' : '重新生成'}
+        </button>
+        <button
+          type="button"
+          className="dsh-av-btn"
+          data-bookmarked={bookmark?.bookmarked === true || undefined}
+          disabled={busyAction !== null}
+          onClick={() => onToggleBookmark(sessionId)}
+          title={bookmark?.bookmarked ? '取消收藏' : '收藏会话'}
+        >
+          {bookmark?.bookmarked ? '★ 已收藏' : '☆ 收藏'}
+        </button>
+        <button
+          type="button"
+          className="dsh-av-btn"
+          data-has-note={(bookmark?.note ?? '') !== '' || undefined}
+          disabled={busyAction !== null}
+          onClick={() => { setNoteDraft(bookmark?.note ?? ''); setNoteOpen(v => !v) }}
+          title="便签"
+        >
+          {(bookmark?.note ?? '') !== '' ? '📝 便签' : '📝 写便签'}
+        </button>
+        <select
+          className="dsh-av-select"
+          title="移动到文件夹"
+          value=""
+          onChange={event => { onMoveTo(event.target.value === '__unclassified__' ? undefined : event.target.value) }}
+        >
+          <option value="" disabled>移动至…</option>
+          <option value="__unclassified__">未分类</option>
+          {folders.map(folder => <option key={folder.id} value={folder.id}>{folder.name}</option>)}
+        </select>
+        <button type="button" className="dsh-av-btn" disabled={busyAction !== null} onClick={() => void runAction('unarchive')}>
+          {busyAction === 'unarchive' ? '恢复中…' : '恢复'}
+        </button>
+        <button type="button" className="dsh-av-btn" disabled={busyAction !== null} onClick={() => void runAction('download')}>
+          {busyAction === 'download' ? '下载中…' : '导出 ZIP'}
+        </button>
+        <button
+          type="button"
+          className="dsh-av-btn dsh-av-btn-danger"
+          disabled={busyAction !== null}
+          onClick={() => { if (window.confirm(`永久删除会话「${title}」？日志、摘要、书签与文件夹归属将一并清除，此操作不可撤销。`)) void runAction('delete') }}
+        >
+          {busyAction === 'delete' ? '删除中…' : '删除'}
+        </button>
+      </div>
+      {noteOpen && (
+        <div className="dsh-av-note-editor">
+          <textarea
+            autoFocus
+            className="dsh-av-note-input"
+            placeholder="记录这个会话的要点、结论或后续事项…"
+            value={noteDraft}
+            onChange={event => setNoteDraft(event.target.value)}
+            onKeyDown={event => { if (event.key === 'Escape') setNoteOpen(false) }}
+          />
+          <div className="dsh-av-note-actions">
+            <button type="button" className="dsh-av-btn" onClick={() => setNoteOpen(false)}>取消</button>
+            <button type="button" className="dsh-av-btn dsh-av-btn-primary" onClick={commitNote}>保存便签</button>
+          </div>
+        </div>
+      )}
+      {summary !== null && (
+        <SummaryCard
+          snapshot={summary}
+          sessionTitle={title}
+          onRefresh={() => void loadSummary(true)}
+          refreshing={summaryLoading}
+        />
+      )}
+      {open && (
+        <div className="dsh-av-log">
+          {log.error !== null && <div className="dsh-av-log-error">{log.error}</div>}
+          {log.loading && log.events.length === 0 && <div className="dsh-av-log-empty">正在读取对话…</div>}
+          {!log.loading && log.error === null && log.events.length === 0 && (
+            <div className="dsh-av-log-empty">该会话没有可见消息（可能只有工具/系统事件）</div>
+          )}
+          {log.events.map(({ event }) => {
+            if (!CHAT_TYPES.has(event.type)) return null
+            const role = event.type === 'user/message' ? '你' : '助手'
+            return (
+              <div className="dsh-av-msg" key={event.seq}>
+                <span className="dsh-av-msg-role">{role} · {formatTime(event.time)}</span>
+                <span className="dsh-av-msg-text">{textOf(event)}</span>
+              </div>
+            )
+          })}
+          {log.hasMore && (
+            <button type="button" className="dsh-av-btn dsh-av-load-older" disabled={log.loading} onClick={log.loadOlder}>
+              {log.loading ? '加载中…' : '加载更早'}
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  )
+})
+
+/** 面板主体（文件夹树 + 时间线卡片流 + 批量操作条）。 */
+export function ArchivePanelView(props: { stores: ArchiveStores; onClose(): void }): JSX.Element {
+  const { stores, onClose } = props
+  const sessionState = useSyncExternalStore(
+    subscribeOf(stores.sessions),
+    snapshotOf(stores.sessions),
+  )
+  const workspaceState = useSyncExternalStore(
+    subscribeOf(stores.workspaces),
+    snapshotOf(stores.workspaces),
+  )
+  const [notices, setNotices] = useState<Readonly<Record<string, { text: string; kind?: 'error' }>>>({})
+  const [selectedKey, setSelectedKey] = useState<string>('all')
+  const [checked, setChecked] = useState<Readonly<Set<string>>>(new Set())
+  // 已删除的 id 持久化到 localStorage（共享模块）：workspace 表在重启后才会
+  // 彻底移除，刷新页面后仍隐藏（内存态会因 F5 丢失，这里跨刷新保留）。
+  const [deletedIds, setDeletedIds] = useState<Readonly<Set<string>>>(loadDeletedIds)
+
+  const recordDeleted = useCallback((ids: readonly string[]) => {
+    if (ids.length === 0) return
+    // 副作用（写 localStorage）放 updater 外：updater 必须是纯函数（StrictMode 双调）。
+    setDeletedIds(recordDeletedIds(ids))
+  }, [])
+  const [batchAction, setBatchAction] = useState<string | null>(null)
+  const [banner, setBanner] = useState<{ text: string; kind?: 'error' } | null>(null)
+  const bannerTimer = useRef<number | undefined>(undefined)
+  const [maximized, setMaximized] = useState(false)
+  const [refreshing, setRefreshing] = useState(false)
+
+  const workspaceTitles = useMemo(() => workspaceTitlesOf(workspaceState.items), [workspaceState.items])
+
+  const onNotice = useCallback((sessionId: string, text: string, kind?: 'error') => {
+    setNotices(prev => ({ ...prev, [sessionId]: { text, kind } }))
+  }, [])
+
+  // 统一 banner：清除旧定时器 → 设置 → 5s 自动消失（所有路径共用，避免旧 timer 提前清新 banner）。
+  const flashBanner = useCallback((text: string, kind?: 'error') => {
+    setBanner({ text, kind })
+    window.clearTimeout(bannerTimer.current)
+    bannerTimer.current = window.setTimeout(() => setBanner(null), 5000)
+  }, [])
+
+  // 稳定引用：folder/bookmark 的 onError 与 KnowledgeLibrary 的 onNotice 都用它，
+  // 避免内联箭头导致依赖不稳定 → RPC 无限循环。
+  const reportError = useCallback((text: string) => { flashBanner(text, 'error') }, [flashBanner])
+
+  const folderState = useFolderState(stores.connection, reportError)
+  const bookmarkState = useBookmarkState(stores.connection, reportError)
+
+  const displayRows = useMemo<readonly ArchiveRowInfo[]>(() => {
+    const makeRow = (id: SessionId): ArchiveRowInfo => {
+      const summary = sessionState.byId[id]
+      const title = summary?.displayTitle ?? summary?.title ?? `未命名会话 (${id})`
+      const meta = summary === undefined
+        ? '摘要暂不可用'
+        : `${formatTime(summary.updatedAt)}${summary.running ? ' · 运行中' : ''}${summary.blank ? ' · 空白' : ''}`
+      return { id, title, meta, updatedAt: summary?.updatedAt ?? 0, workspace: workspaceTitles.get(id) }
+    }
+    // 本会话已删除的 id 从所有视图隐藏（workspace 表重启后才彻底移除）。
+    const notDeleted = (id: SessionId): boolean => !deletedIds.has(id)
+
+    if (selectedKey === 'bookmarks') {
+      return bookmarkState.bookmarks
+        .filter(entry => entry.bookmarked && notDeleted(entry.sessionId))
+        .map(entry => makeRow(entry.sessionId))
+        .sort((a, b) => b.updatedAt - a.updatedAt)
+    }
+
+    const rows: ArchiveRowInfo[] = workspaceState.archivedSessionIds
+      .filter(notDeleted)
+      .map(makeRow)
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+
+    if (selectedKey === 'all') return rows
+    if (selectedKey === 'unclassified') {
+      return rows.filter(rowRow => folderState.assignment[rowRow.id] === undefined)
+    }
+    if (selectedKey.startsWith('folder:')) {
+      const folderId = selectedKey.slice('folder:'.length)
+      return rows.filter(rowRow => folderState.assignment[rowRow.id] === folderId)
+    }
+    return rows
+  }, [workspaceState.archivedSessionIds, sessionState.byId, workspaceTitles, selectedKey, folderState.assignment, bookmarkState.bookmarks, deletedIds])
+
+  // 全部归档的可见数（排除本会话已删除的 id），header 与树计数统一用。
+  const visibleTotal = useMemo(
+    () => workspaceState.archivedSessionIds.filter(id => !deletedIds.has(id)).length,
+    [workspaceState.archivedSessionIds, deletedIds],
+  )
+
+  const isLibrary = selectedKey === 'library'
+
+  const toggleChecked = useCallback((id: string) => {
+    setChecked(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }, [])
+
+  const toggleAll = useCallback(() => {
+    setChecked(prev => {
+      const allChecked = displayRows.length > 0 && displayRows.every(row => prev.has(row.id))
+      const next = new Set(prev)
+      if (allChecked) for (const row of displayRows) next.delete(row.id)
+      else for (const row of displayRows) next.add(row.id)
+      return next
+    })
+  }, [displayRows])
+
+  const onUnarchive = useCallback(async (sessionId: string) => {
+    await unarchiveSessionRpc(sessionId)
+    setChecked(prev => { const next = new Set(prev); next.delete(sessionId); return next })
+    flashBanner('会话已恢复，已回到原工作区分组')
+  }, [flashBanner])
+
+  // 行级回调缓存：稳定引用让 memo(ArchiveRow) 在大列表下跳过无关重渲染。
+  const rowCallbacks = useMemo(() => {
+    const toggleCheckedById = new Map<string, () => void>()
+    const moveToById = new Map<string, (folderId: string | undefined) => void>()
+    const toggleBookmarkById = new Map<string, () => void>()
+    const saveNoteById = new Map<string, (note: string) => void>()
+    return {
+      toggleChecked(id: string): () => void {
+        let fn = toggleCheckedById.get(id)
+        if (fn === undefined) {
+          fn = () => toggleChecked(id)
+          toggleCheckedById.set(id, fn)
+        }
+        return fn
+      },
+      moveTo(id: string): (folderId: string | undefined) => void {
+        let fn = moveToById.get(id)
+        if (fn === undefined) {
+          fn = (folderId) => {
+            void folderState.moveSession(id, folderId).catch(cause => {
+              reportError(`移动失败：${cause instanceof Error ? cause.message : String(cause)}`)
+            })
+          }
+          moveToById.set(id, fn)
+        }
+        return fn
+      },
+      toggleBookmark(id: string): () => void {
+        let fn = toggleBookmarkById.get(id)
+        if (fn === undefined) {
+          fn = () => { void bookmarkState.toggle(id) }
+          toggleBookmarkById.set(id, fn)
+        }
+        return fn
+      },
+      saveNote(id: string): (note: string) => void {
+        let fn = saveNoteById.get(id)
+        if (fn === undefined) {
+          fn = (note) => { void bookmarkState.setNote(id, note) }
+          saveNoteById.set(id, fn)
+        }
+        return fn
+      },
+    }
+  }, [toggleChecked, folderState.moveSession, bookmarkState.toggle, bookmarkState.setNote, reportError])
+
+  const moveCheckedTo = useCallback(async (folderId: string | undefined) => {
+    const ids = [...checked]
+    if (ids.length === 0) return
+    setBatchAction('move')
+    try {
+      let okCount = 0
+      let failCount = 0
+      const results = await Promise.allSettled(ids.map(id => folderState.moveSession(id, folderId)))
+      for (const result of results) {
+        if (result.status === 'fulfilled') okCount += 1
+        else failCount += 1
+      }
+      if (failCount === 0) flashBanner(`已将 ${okCount} 个会话移至${folderId === undefined ? '未分类' : '目标文件夹'}`)
+      else flashBanner(`移动完成：成功 ${okCount}，失败 ${failCount}`, 'error')
+      setChecked(new Set())
+    } catch (cause) {
+      flashBanner(`批量移动失败：${cause instanceof Error ? cause.message : String(cause)}`, 'error')
+    } finally {
+      setBatchAction(null)
+    }
+  }, [checked, folderState.moveSession, flashBanner])
+
+  const [libraryCount, setLibraryCount] = useState<number | null>(null)
+  // 抛错：初始加载与手动刷新（onRefresh）共用。
+  const reloadLibraryCount = useCallback(async () => {
+    if (stores.connection === undefined) throw new Error('归档数据服务未连接')
+    const list = await listSummariesRpc(stores.connection)
+    setLibraryCount(list.length)
+  }, [stores.connection])
+  useEffect(() => {
+    void reloadLibraryCount().catch(() => { setLibraryCount(null) })
+  }, [reloadLibraryCount])
+
+  const batchDownload = useCallback(async () => {
+    setBatchAction('download')
+    try {
+      let done = 0
+      for (const id of checked) {
+        try {
+          await downloadLogZip(id)
+          done += 1
+        } catch {
+          // 逐个失败继续；浏览器可能拦截连续下载，见提示
+        }
+      }
+      flashBanner(`已开始导出 ${done} 个会话 ZIP。若浏览器拦截多个下载，请允许一次下载。`)
+    } finally {
+      setBatchAction(null)
+    }
+  }, [checked, flashBanner])
+
+  const batchSummarize = useCallback(async () => {
+    if (stores.connection === undefined) return
+    setBatchAction('summarize')
+    try {
+      let okCount = 0
+      let failCount = 0
+      for (const id of checked) {
+        try {
+          await readSummaryRpc(stores.connection, id, true)
+          okCount += 1
+        } catch {
+          failCount += 1
+        }
+      }
+      if (failCount === 0) flashBanner(`已为 ${okCount} 个会话生成摘要`)
+      else flashBanner(`摘要生成完成：成功 ${okCount}，失败 ${failCount}`, 'error')
+    } finally {
+      setBatchAction(null)
+    }
+  }, [checked, stores.connection, flashBanner])
+
+  const batchUnarchive = useCallback(async () => {
+    setBatchAction('unarchive')
+    try {
+      let okCount = 0
+      let failCount = 0
+      const results = await Promise.allSettled([...checked].map(id => onUnarchive(id)))
+      for (const result of results) {
+        if (result.status === 'fulfilled') okCount += 1
+        else failCount += 1
+      }
+      if (failCount === 0) flashBanner(`已恢复 ${okCount} 个会话`)
+      else flashBanner(`恢复完成：成功 ${okCount}，失败 ${failCount}`, 'error')
+      setChecked(new Set())
+    } finally {
+      setBatchAction(null)
+    }
+  }, [checked, onUnarchive, flashBanner])
+
+  const onDelete = useCallback(async (sessionId: string) => {
+    if (stores.connection === undefined) throw new Error('归档数据服务未连接')
+    await deleteSessionRpc(stores.connection, sessionId)
+    setChecked(prev => { const next = new Set(prev); next.delete(sessionId); return next })
+    // 本地隐藏并跨刷新保留（workspace 表重启后才会彻底移除）。
+    recordDeleted([sessionId])
+    flashBanner('会话已永久删除')
+  }, [stores.connection, flashBanner, recordDeleted])
+
+  const batchDelete = useCallback(async () => {
+    if (stores.connection === undefined) return
+    const ids = [...checked]
+    if (ids.length === 0) return
+    if (!window.confirm(`永久删除选中的 ${ids.length} 个会话？日志、摘要、书签与文件夹归属将一并清除，此操作不可撤销。`)) return
+    setBatchAction('delete')
+    try {
+      let okCount = 0
+      let failCount = 0
+      const removed = new Set<string>()
+      for (const id of ids) {
+        try {
+          await deleteSessionRpc(stores.connection, id)
+          okCount += 1
+          removed.add(id)
+        } catch {
+          failCount += 1
+        }
+      }
+      if (removed.size > 0) recordDeleted([...removed])
+      if (failCount === 0) flashBanner(`已永久删除 ${okCount} 个会话`)
+      else flashBanner(`删除完成：成功 ${okCount}，失败 ${failCount}`, 'error')
+      setChecked(new Set())
+    } finally {
+      setBatchAction(null)
+    }
+  }, [checked, stores.connection, flashBanner, recordDeleted])
+
+  useEffect(() => () => { window.clearTimeout(bannerTimer.current) }, [])
+
+  // 手动刷新：重拉文件夹/书签/经验库数据。
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true)
+    try {
+      await Promise.all([folderState.reload(), bookmarkState.reload(), reloadLibraryCount()])
+      flashBanner('已刷新')
+    } catch (cause) {
+      flashBanner(`刷新失败：${cause instanceof Error ? cause.message : String(cause)}`, 'error')
+    } finally {
+      setRefreshing(false)
+    }
+  }, [folderState.reload, bookmarkState.reload, reloadLibraryCount, flashBanner])
+
+  return (
+    <div data-dsh-archive-viewer-panel data-maximized={maximized || undefined}>
+      <div className="dsh-av-header">
+        <h2 className="dsh-av-title">会话归档 · 经验库</h2>
+        <div className="dsh-av-count">
+          {selectedKey === 'library' ? `${folderState.loading ? '…' : ''}` : `${visibleTotal} 会话`}
+        </div>
+        <div className="dsh-av-header-actions">
+          <button
+            type="button"
+            className="dsh-av-hbtn"
+            disabled={refreshing}
+            onClick={() => setMaximized(v => !v)}
+          >
+            {maximized ? '还原' : '最大化'}
+          </button>
+          <button
+            type="button"
+            className="dsh-av-hbtn"
+            disabled={refreshing}
+            onClick={() => void onRefresh()}
+          >
+            {refreshing ? '刷新中…' : '刷新'}
+          </button>
+          <button type="button" className="dsh-av-close" onClick={onClose}>关闭</button>
+        </div>
+      </div>
+      {banner !== null && (
+        <div className="dsh-av-notice" data-kind={banner.kind} role="status">{banner.text}</div>
+      )}
+      <div className="dsh-av-pane">
+        {stores.connection !== undefined && (
+          <FolderTree
+            folders={folderState.folders}
+            assignment={folderState.assignment}
+            archivedIds={workspaceState.archivedSessionIds.filter(id => !deletedIds.has(id))}
+            totalCount={visibleTotal}
+            bookmarkCount={bookmarkState.bookmarks.filter(entry => entry.bookmarked && !deletedIds.has(entry.sessionId)).length}
+            selected={selectedKey}
+            onSelect={(key) => { setSelectedKey(key); setChecked(new Set()) }}
+            onCreate={folderState.createFolder}
+            onRename={folderState.renameFolder}
+            onRemove={folderState.removeFolder}
+            libraryCount={libraryCount ?? 0}
+          />
+        )}
+        <div className="dsh-av-main">
+          {isLibrary ? (
+            stores.connection === undefined
+              ? <div className="dsh-av-empty">connection 服务不可用，无法读取经验库</div>
+              : <KnowledgeLibrary connection={stores.connection} onNotice={(text, kind) => { flashBanner(text, kind) }} />
+          ) : (
+            <>
+              <div className="dsh-av-note">
+                {selectedKey === 'all' && '全部归档会话。可按文件夹归档整理，勾选后可批量导出 / 摘要 / 恢复。'}
+                {selectedKey === 'bookmarks' && '收藏的会话（含未归档）。点「★」可取消收藏，「📝」可记录便签。'}
+                {selectedKey === 'unclassified' && '未归入任何文件夹的归档会话。可移入文件夹整理。'}
+                {!selectedKey.startsWith('folder:') && selectedKey !== 'all' && selectedKey !== 'unclassified' && selectedKey !== 'bookmarks' && '归档会话沉淀区。'}
+                {selectedKey.startsWith('folder:') && '该文件夹内的归档会话（按最近更新时间倒序）。'}
+              </div>
+              <div className="dsh-av-list-head">
+                <label className="dsh-av-check">
+                  <input
+                    type="checkbox"
+                    checked={displayRows.length > 0 && displayRows.every(row => checked.has(row.id))}
+                    onChange={toggleAll}
+                    aria-label="全选会话"
+                  />
+                  <span />
+                </label>
+                <span className="dsh-av-list-head-label">全选</span>
+                <span className="dsh-av-list-head-count">共 {displayRows.length} 条</span>
+              </div>
+              <div className="dsh-av-list">
+                {!workspaceState.baselinesReady && <div className="dsh-av-empty">正在加载会话列表…</div>}
+                {workspaceState.baselinesReady && displayRows.length === 0 && <div className="dsh-av-empty">这个视图下没有归档会话</div>}
+                {displayRows.map((row) => (
+                  <div key={row.id}>
+                    <ArchiveRow
+                      connection={stores.connection}
+                      row={row}
+                      checked={checked.has(row.id)}
+                      onToggleChecked={rowCallbacks.toggleChecked(row.id)}
+                      onMoveTo={rowCallbacks.moveTo(row.id)}
+                      folders={folderState.folders}
+                      bookmark={bookmarkState.bySession[row.id]}
+                      onToggleBookmark={rowCallbacks.toggleBookmark(row.id)}
+                      onSaveNote={rowCallbacks.saveNote(row.id)}
+                      onNotice={onNotice}
+                      onUnarchive={onUnarchive}
+                      onDelete={onDelete}
+                    />
+                    {notices[row.id] !== undefined && (
+                      <div className="dsh-av-notice" data-kind={notices[row.id]!.kind} role="status">
+                        {notices[row.id]!.text}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+      {checked.size > 0 && !isLibrary && (
+        <div className="dsh-av-batchbar">
+          <span className="dsh-av-batchbar-count">已选 {checked.size} 项</span>
+          <button type="button" className="dsh-av-btn" disabled={batchAction !== null} onClick={() => void batchDownload()}>
+            {batchAction === 'download' ? '导出中…' : '导出 ZIP'}
+          </button>
+          <button type="button" className="dsh-av-btn" disabled={batchAction !== null || stores.connection === undefined} onClick={() => void batchSummarize()}>
+            {batchAction === 'summarize' ? '摘要中…' : '生成摘要'}
+          </button>
+          <button type="button" className="dsh-av-btn" disabled={batchAction !== null} onClick={() => void batchUnarchive()}>
+            {batchAction === 'unarchive' ? '恢复中…' : '恢复会话'}
+          </button>
+          <button type="button" className="dsh-av-btn dsh-av-btn-danger" disabled={batchAction !== null || stores.connection === undefined} onClick={() => void batchDelete()}>
+            {batchAction === 'delete' ? '删除中…' : '删除'}
+          </button>
+          <div className="dsh-av-batchbar-move">
+            <select className="dsh-av-select" value="" onChange={event => { void moveCheckedTo(event.target.value === '__unclassified__' ? undefined : event.target.value) }}>
+              <option value="" disabled>移动到文件夹…</option>
+              <option value="__unclassified__">未分类</option>
+              {folderState.folders.map(folder => <option key={folder.id} value={folder.id}>{folder.name}</option>)}
+            </select>
+          </div>
+          <button type="button" className="dsh-av-btn" onClick={() => setChecked(new Set())}>取消</button>
+        </div>
+      )}
+    </div>
+  )
+}
