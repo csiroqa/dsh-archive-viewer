@@ -575,6 +575,15 @@ export const CSS_TEXT = `
   background: color-mix(in srgb, var(--dsw-alias-state-business-primary, #3964fe) 18%, transparent);
 }
 
+/* 危险操作（删除）：错误色语义 */
+.dsh-av-btn-danger {
+  color: var(--dsw-alias-state-error-primary);
+  background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 8%, transparent);
+}
+.dsh-av-btn-danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 14%, transparent);
+}
+
 /* ── 对话日志 ── */
 .dsh-av-log {
   border-top: 1px dashed var(--dsw-alias-border-l2);

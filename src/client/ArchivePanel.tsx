@@ -213,6 +213,12 @@ async function bookmarkRpc(
   }
 }
 
+/** 删除会话（host 半区文件级清理：日志 + 快照 + 书签 + 文件夹归属）。 */
+async function deleteSessionRpc(connection: ConnectionHandle, sessionId: string): Promise<void> {
+  const result: RpcResult = await connection.rpc.call('/rpc', 'archive.session.delete', { sessionId })
+  if (!result.ok) throw new Error(result.error?.message ?? '删除会话失败')
+}
+
 /** 复制会话 id（剪贴板 API + 兜底 execCommand）。 */
 async function copySessionId(id: string): Promise<void> {
   try {
@@ -733,8 +739,9 @@ function ArchiveRow(props: {
   onSaveNote(sessionId: SessionId, note: string): void
   onNotice(sessionId: SessionId, text: string, kind?: 'error'): void
   onUnarchive(sessionId: SessionId): Promise<void>
+  onDelete(sessionId: SessionId): Promise<void>
 }): JSX.Element {
-  const { connection, row, checked, onToggleChecked, onMoveTo, folders, bookmark, onToggleBookmark, onSaveNote, onNotice, onUnarchive } = props
+  const { connection, row, checked, onToggleChecked, onMoveTo, folders, bookmark, onToggleBookmark, onSaveNote, onNotice, onUnarchive, onDelete } = props
   const { id: sessionId, title, meta, workspace } = row
   const [open, setOpen] = useState(false)
   const [busyAction, setBusyAction] = useState<string | null>(null)
@@ -766,7 +773,7 @@ function ArchiveRow(props: {
     }
   }, [connection, sessionId, onNotice])
 
-  const runAction = useCallback(async (kind: 'download' | 'copy' | 'unarchive') => {
+  const runAction = useCallback(async (kind: 'download' | 'copy' | 'unarchive' | 'delete') => {
     setBusyAction(kind)
     try {
       if (kind === 'download') {
@@ -775,6 +782,8 @@ function ArchiveRow(props: {
       } else if (kind === 'copy') {
         await copySessionId(sessionId)
         onNotice(sessionId, '会话 ID 已复制')
+      } else if (kind === 'delete') {
+        await onDelete(sessionId)
       } else {
         await onUnarchive(sessionId)
       }
@@ -783,7 +792,7 @@ function ArchiveRow(props: {
     } finally {
       setBusyAction(null)
     }
-  }, [sessionId, onNotice, onUnarchive])
+  }, [sessionId, onNotice, onUnarchive, onDelete])
 
   return (
     <div className="dsh-av-row" data-checked={checked || undefined}>
@@ -843,6 +852,14 @@ function ArchiveRow(props: {
         </button>
         <button type="button" className="dsh-av-btn" disabled={busyAction !== null} onClick={() => void runAction('download')}>
           {busyAction === 'download' ? '下载中…' : '导出 ZIP'}
+        </button>
+        <button
+          type="button"
+          className="dsh-av-btn dsh-av-btn-danger"
+          disabled={busyAction !== null}
+          onClick={() => { if (window.confirm(`永久删除会话「${title}」？日志、摘要、书签与文件夹归属将一并清除，此操作不可撤销。`)) void runAction('delete') }}
+        >
+          {busyAction === 'delete' ? '删除中…' : '删除'}
         </button>
       </div>
       {noteOpen && (
@@ -1083,6 +1100,38 @@ export function ArchivePanelView(props: { stores: ArchiveStores; onClose(): void
     }
   }, [checked, onUnarchive, flashBanner])
 
+  const onDelete = useCallback(async (sessionId: string) => {
+    if (stores.connection === undefined) throw new Error('归档数据服务未连接')
+    await deleteSessionRpc(stores.connection, sessionId)
+    setChecked(prev => { const next = new Set(prev); next.delete(sessionId); return next })
+    flashBanner('会话已永久删除')
+  }, [stores.connection, flashBanner])
+
+  const batchDelete = useCallback(async () => {
+    if (stores.connection === undefined) return
+    const ids = [...checked]
+    if (ids.length === 0) return
+    if (!window.confirm(`永久删除选中的 ${ids.length} 个会话？日志、摘要、书签与文件夹归属将一并清除，此操作不可撤销。`)) return
+    setBatchAction('delete')
+    try {
+      let okCount = 0
+      let failCount = 0
+      for (const id of ids) {
+        try {
+          await deleteSessionRpc(stores.connection, id)
+          okCount += 1
+        } catch {
+          failCount += 1
+        }
+      }
+      if (failCount === 0) flashBanner(`已永久删除 ${okCount} 个会话`)
+      else flashBanner(`删除完成：成功 ${okCount}，失败 ${failCount}`, 'error')
+      setChecked(new Set())
+    } finally {
+      setBatchAction(null)
+    }
+  }, [checked, stores.connection, flashBanner])
+
   useEffect(() => () => { window.clearTimeout(bannerTimer.current) }, [])
 
   return (
@@ -1156,6 +1205,7 @@ export function ArchivePanelView(props: { stores: ArchiveStores; onClose(): void
                       onSaveNote={(sessionId, note) => { void bookmarkState.setNote(sessionId, note) }}
                       onNotice={onNotice}
                       onUnarchive={onUnarchive}
+                      onDelete={onDelete}
                     />
                     {notices[row.id] !== undefined && (
                       <div className="dsh-av-notice" data-kind={notices[row.id]!.kind}>
@@ -1180,6 +1230,9 @@ export function ArchivePanelView(props: { stores: ArchiveStores; onClose(): void
           </button>
           <button type="button" className="dsh-av-btn" disabled={batchAction !== null} onClick={() => void batchUnarchive()}>
             {batchAction === 'unarchive' ? '恢复中…' : '恢复会话'}
+          </button>
+          <button type="button" className="dsh-av-btn dsh-av-btn-danger" disabled={batchAction !== null || stores.connection === undefined} onClick={() => void batchDelete()}>
+            {batchAction === 'delete' ? '删除中…' : '删除'}
           </button>
           <div className="dsh-av-batchbar-move">
             <select className="dsh-av-select" value="" onChange={event => { void moveCheckedTo(event.target.value === '__unclassified__' ? undefined : event.target.value) }}>

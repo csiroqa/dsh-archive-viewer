@@ -19,7 +19,7 @@
  * 收集器保持包完全自包含。
  */
 
-import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -55,13 +55,13 @@ interface LiveSession {
   id: SessionId
   header?: { createdAt?: number; cwd?: string }
   events?: readonly SessionEvent[]
-  running?: boolean
 }
 
 /** 持久化会话头部（冷会话）。 */
 interface PersistedHeader {
   id: SessionId
   createdAt: number
+  cwd?: string
 }
 
 /** sessionPersistence.inspect 的结果（冷会话事件读取）。 */
@@ -99,6 +99,7 @@ interface HostContext {
   sessionPersistence: {
     list(): Promise<readonly PersistedHeader[]>
     inspect(id: SessionId, signal?: AbortSignal): Promise<SessionInspection>
+    locate(header: PersistedHeader): { kind: string; path: string } | undefined
   }
   workspaceRegistry: {
     archiveSession(id: SessionId): Promise<void>
@@ -541,6 +542,19 @@ export class FolderStore {
     }
     return map
   }
+
+  /** 会话删除时清理其文件夹归属（无归属时无操作）。 */
+  async removeForSession(sessionId: string): Promise<void> {
+    const folders = await this.load()
+    let touched = false
+    for (const folder of folders) {
+      if (folder.assignment !== undefined && folder.assignment[sessionId] !== undefined) {
+        delete folder.assignment[sessionId]
+        touched = true
+      }
+    }
+    if (touched) await this.save()
+  }
 }
 
 const folderStore = new FolderStore()
@@ -643,9 +657,72 @@ export class BookmarkStore {
     await this.save()
     return existing
   }
+
+  /** 会话删除时清理其书签条目（无条目时无操作）。 */
+  async removeForSession(sessionId: string): Promise<void> {
+    const entries = await this.load()
+    if (entries[sessionId] === undefined) return
+    delete entries[sessionId]
+    await this.save()
+  }
 }
 
 const bookmarkStore = new BookmarkStore()
+
+/* ------------------------------------------------------------------ */
+/* 删除会话（文件级清理：日志文件 + 快照 + 书签 + 文件夹归属）        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 删除一个会话（仅限非 running）：
+ *  1. 删除会话日志文件（路径经官方 sessionPersistence.locate 获取，
+ *     不硬编码后端目录布局，后端实现变化时自动跟随）
+ *  2. 删除归档快照（json + md）
+ *  3. 清理书签条目
+ *  4. 清理文件夹归属
+ * workspace 注册表的 sessionIds 不在此处改写——持久化文件删除后，
+ * 下一次启动 bootstrap 会以 header 重建，自动过滤已删会话。
+ * @returns 删除是否成功（目标不存在视为失败并给出原因）。
+ */
+async function deleteSession(ctx: HostContext, sessionId: SessionId): Promise<{ ok: true } | { ok: false; reason: string }> {
+  if (ctx.agents.get(sessionId)?.status === 'running') return { ok: false, reason: '运行中的会话不能删除' }
+
+  const headers = await ctx.sessionPersistence.list()
+  const header = headers.find(item => item.id === sessionId)
+  if (header === undefined) return { ok: false, reason: '会话不存在或尚未持久化' }
+
+  // 1) 删除会话日志文件（官方 locate 给出后端拥有的绝对路径）。
+  const location = ctx.sessionPersistence.locate(header)
+  if (location !== undefined) {
+    try {
+      await rm(location.path, { force: true })
+    } catch (error) {
+      return { ok: false, reason: `删除日志失败：${error instanceof Error ? error.message : String(error)}` }
+    }
+  }
+
+  // 2) 清理快照文件。
+  await Promise.all([
+    rm(join(snapshotDir(), jsonFilename(sessionId)), { force: true }).catch(() => undefined),
+    rm(join(snapshotDir(), mdFilename(sessionId)), { force: true }).catch(() => undefined),
+  ])
+
+  // 3) 清理书签条目。
+  try {
+    await bookmarkStore.removeForSession(sessionId)
+  } catch (error) {
+    ctx.logger.warn(`[archive-viewer] bookmark cleanup failed for ${String(sessionId)}: ${String(error)}`)
+  }
+
+  // 4) 清理文件夹归属。
+  try {
+    await folderStore.removeForSession(sessionId)
+  } catch (error) {
+    ctx.logger.warn(`[archive-viewer] folder cleanup failed for ${String(sessionId)}: ${String(error)}`)
+  }
+
+  return { ok: true }
+}
 
 /* ------------------------------------------------------------------ */
 /* 自动定期归档                                                        */
@@ -908,6 +985,14 @@ export function apply(ctx: HostContext, config: ArchiveViewerConfig): () => void
           const entry = await bookmarkStore.setNote(p.sessionId, p.note)
           // setNote 清空后条目可能被删除（幽灵），返回 null 与 toggle 对齐。
           return ok({ bookmarks: await bookmarkStore.list(), updated: entry })
+        }
+        case 'archive.session.delete': {
+          const p = payload as { sessionId?: unknown } | null
+          if (typeof p?.sessionId !== 'string' || p.sessionId === '') return fail('sessionId is required', 'bad-request')
+          const result = await deleteSession(ctx, p.sessionId as SessionId)
+          return result.ok
+            ? ok({ deleted: true })
+            : fail(result.reason, 'delete-failed')
         }
         default:
           return fail(`unknown endpoint ${JSON.stringify(endpoint)}`, 'unknown-endpoint')
