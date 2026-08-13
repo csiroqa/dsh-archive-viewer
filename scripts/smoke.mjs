@@ -83,3 +83,26 @@ try {
 } finally {
   rmSync(home2, { recursive: true, force: true })
 }
+
+// 4) 会话删除：目录定位规则 + 书签/文件夹归属清理
+const home3 = mkdtempSync(join(tmpdir(), 'dsh-av-del-smoke-'))
+try {
+  const { BookmarkStore, FolderStore } = await import(fromRoot('src/index.ts'))
+  const bookmarks = new BookmarkStore(home3)
+  const folders = new FolderStore(home3)
+  const sessionId = 's-abc-123'
+
+  await bookmarks.toggle(sessionId)
+  const folder = await folders.create('项目A')
+  await folders.move(sessionId, folder.id)
+  if ((await folders.assignmentOf())[sessionId] !== folder.id) throw new Error('prep move failed')
+
+  await bookmarks.removeForSession(sessionId)
+  await folders.removeForSession(sessionId)
+  if ((await folders.assignmentOf())[sessionId] !== undefined) throw new Error('folder cleanup failed')
+  if ((await bookmarks.list()).length !== 0) throw new Error('bookmark cleanup failed')
+
+  console.log('session-delete cleanup ok (bookmarks + folder assignment)')
+} finally {
+  rmSync(home3, { recursive: true, force: true })
+}
