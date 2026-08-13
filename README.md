@@ -1,6 +1,6 @@
 # dsh-archive-viewer
 
-DeepSeek Harness（DSH）Web GUI 的**归档增强插件**：自动定期归档、文件夹归档整理、LLM 摘要沉淀经验库、会话收藏与便签，外加已归档会话的查看 / 恢复与一键关闭 dsh。
+DeepSeek Harness（DSH）的**归档增强**插件：自动定期归档空闲会话、文件夹归档整理、LLM 摘要沉淀经验库、会话收藏与便签，外加已归档会话的查看 / 恢复与一键关闭 dsh。
 
 English: [README.en.md](README.en.md)
 
@@ -29,7 +29,7 @@ English: [README.en.md](README.en.md)
 ### 其他
 
 - **右上角「关闭 dsh」按钮**：确认后优雅关机（等价于 Ctrl+C，5 秒宽限收尾）
-- **皮肤全适配**：全部使用 shell 设计令牌（`--dsw-alias-*` + `--ln-primary` 品牌色），自动跟随任意皮肤；面板 Portal 到 `document.body` 避开侧边栏令牌覆盖
+- **皮肤全适配**：全部使用 shell 设计令牌（`--dsw-alias-*` + `--dsw-alias-state-business-primary` 强调色），自动跟随任意皮肤；面板 Portal 到 `document.body` 避开侧边栏令牌覆盖
 
 ## 配置
 
@@ -89,8 +89,15 @@ dsh plugin --profile web add link:E:\path\to\dsh-archive-viewer   # Windows
 3. 勾选多个会话后底部批量操作条出现；「经验库」视图检索沉淀摘要
 4. 会话头部**右上角**电源按钮 → 确认后关闭 dsh
 
+## 安全说明
+
+- **自动定期归档会无人值守地移动你的会话**（默认空闲 7 天后），归档会话从所有会话列表与搜索中隐藏但日志完整保留，可随时恢复；如不希望自动归档，请把 `autoArchiveEnabled` 设为 `false`
+- **LLM 摘要会消耗模型 token**：每次会话完成或点「生成摘要」都会发起一次模型请求，请确认插件 config 的 `provider / model` 与你的额度预期匹配
+- 插件数据（文件夹、书签、摘要）保存在本机 `$DSH_HOME/archive_snapshots/`，请勿把该目录暴露给不可信进程
+
 ## 兼容性
 
+- **平台**：Windows / macOS / Linux（Node >= 22）
 - 针对 DSH `0.1.0-rc.5` 源码检出开发验证
 - 客户端零框架类型依赖：不 import 任何 `@deepseek-ai/*` 值，全部结构类型，不随 DSH SDK 版本漂移
 - 构建产物：`tsdown`（host 半区 `lib/index.js` + browser 半区 `lib/client.js`，标准 `window.__ModuleLoader__.load` 闭包工厂格式）
