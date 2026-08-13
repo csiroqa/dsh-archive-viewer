@@ -1,8 +1,9 @@
 /**
  * dsh-archive-viewer 注入样式。
- * 全部使用 shell 的设计令牌（--dsw-alias-* / --dsh-*）：皮肤（skin）就是重定义
- * 这些变量，因此本插件自动跟随当前皮肤，无需逐皮肤适配。几何与交互样式参照
- * 官方 ui-cordis 的 CordisPanel.module.css（同为 sidebar.footer.action 注册项）。
+ * 视觉语言对齐官方 ui-agent-preset（Card/Row/groupHead 模式）与 ui-conversation
+ * InputBar：卡片用 bg-layer-3 + border-l2、hover 强化到 label-dimmed；行内列表用
+ * border-bottom 分隔；分组头大写 600 letter-spacing；操作按钮为浅底 pill。
+ * 全部使用 --dsw-alias-* 令牌跟随皮肤，强调色用 --dsw-alias-state-business-primary。
  */
 
 export const CSS_TEXT = `
@@ -67,7 +68,7 @@ export const CSS_TEXT = `
   white-space: nowrap;
 }
 
-/* ── 面板（fixed 层叠，锚在侧边栏上方；几何参照 CordisPanel） ── */
+/* ── 面板（fixed 层叠；对齐官方浮层面板观感） ── */
 [data-dsh-archive-viewer-panel] {
   position: fixed;
   left: 12px;
@@ -75,16 +76,12 @@ export const CSS_TEXT = `
   z-index: 30;
   display: flex;
   flex-direction: column;
-  width: 760px;
+  width: 780px;
   max-width: calc(100vw - 24px);
   height: 76vh;
-  max-height: 76vh;
   overflow: hidden;
   border: 1px solid var(--dsw-alias-border-l1);
   border-radius: 14px;
-  /* 浮动层必须用 overlay 令牌：皮肤的 bg-base 是半透明/全透明（whale-song 0.42、
-     maid-atelier transparent），bg-overlay 才是各皮肤为浮动面板准备的高不透明度面
-     （0.92+）。带 fallback 链保证任何主题下都有实底。 */
   background: var(--dsw-alias-bg-overlay, var(--dsw-alias-bg-base, #111418));
   box-shadow: var(--dsw-shadow-lv2);
   --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
@@ -95,17 +92,16 @@ export const CSS_TEXT = `
   display: flex;
   align-items: center;
   gap: 10px;
-  min-height: 46px;
-  padding: 10px 14px;
+  min-height: 52px;
+  padding: 12px 16px;
   box-sizing: border-box;
   border-bottom: 1px solid var(--dsw-alias-border-l2);
-  background: linear-gradient(to bottom, var(--dsw-alias-bg-layer-1, transparent), transparent);
 }
 .dsh-av-title {
   margin: 0;
-  font-size: 13.5px;
+  font-size: 18px;
   font-weight: 600;
-  line-height: 20px;
+  line-height: 26px;
   color: var(--dsw-alias-label-primary);
   letter-spacing: 0.01em;
 }
@@ -118,10 +114,11 @@ export const CSS_TEXT = `
 }
 .dsh-av-close {
   margin-left: auto;
-  padding: 3px 10px;
+  height: 28px;
+  padding: 0 12px;
   border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 7px;
-  background: transparent;
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-2);
   color: var(--dsw-alias-label-secondary);
   font-family: inherit;
   font-size: 12px;
@@ -130,15 +127,16 @@ export const CSS_TEXT = `
 }
 .dsh-av-close:hover {
   background: var(--dsw-alias-interactive-bg-hover);
-  border-color: var(--dsw-alias-border-l1);
+  border-color: var(--dsw-alias-label-dimmed);
 }
 .dsh-av-notice {
   flex: none;
-  padding: 6px 14px;
-  font-size: 11.5px;
-  line-height: 16px;
+  padding: 8px 16px;
+  font-size: 12px;
+  line-height: 18px;
   color: var(--dsw-alias-label-secondary);
   border-bottom: 1px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-layer-1, transparent);
 }
 .dsh-av-notice[data-kind="error"] {
   color: var(--dsw-alias-state-error-primary);
@@ -149,11 +147,11 @@ export const CSS_TEXT = `
   display: flex;
 }
 
-/* ── 左栏：文件夹树 ── */
+/* ── 左栏：文件夹树（对齐官方侧栏列表观感） ── */
 .dsh-av-tree {
   flex: none;
-  width: 208px;
-  min-width: 208px;
+  width: 220px;
+  min-width: 220px;
   display: flex;
   flex-direction: column;
   border-right: 1px solid var(--dsw-alias-border-l2);
@@ -161,13 +159,13 @@ export const CSS_TEXT = `
 }
 .dsh-av-tree-title {
   flex: none;
-  padding: 12px 14px 6px;
-  font-size: 11px;
+  padding: 16px 16px 8px;
+  font-size: 12px;
   font-weight: 600;
   line-height: 16px;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: var(--dsw-alias-label-caption);
+  color: var(--dsw-alias-label-tertiary);
 }
 .dsh-av-tree-scroll {
   flex: 1;
@@ -175,22 +173,22 @@ export const CSS_TEXT = `
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 2px;
   padding: 0 8px 8px;
 }
 .dsh-av-tree-item {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   width: 100%;
-  height: 28px;
-  padding: 0 9px;
+  height: 32px;
+  padding: 0 10px;
   border: none;
   border-radius: 8px;
   background: transparent;
   color: var(--dsw-alias-label-secondary);
   font-family: inherit;
-  font-size: 12.5px;
+  font-size: 13px;
   text-align: left;
   cursor: pointer;
   transition: background 0.1s ease, color 0.1s ease;
@@ -208,11 +206,11 @@ export const CSS_TEXT = `
   color: var(--dsw-alias-state-business-primary, #3964fe);
 }
 .dsh-av-tree-item[data-indent="true"] {
-  padding-left: 26px;
+  padding-left: 28px;
 }
 .dsh-av-tree-icon {
   flex: none;
-  width: 12px;
+  width: 14px;
   color: var(--dsw-alias-label-tertiary);
   font-size: 10px;
 }
@@ -225,16 +223,16 @@ export const CSS_TEXT = `
 }
 .dsh-av-tree-count {
   flex: none;
-  min-width: 20px;
-  height: 16px;
-  padding: 0 5px;
+  min-width: 22px;
+  height: 18px;
+  padding: 0 6px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 8px;
-  background: var(--dsw-alias-button-ghost-active-fill);
+  border-radius: 9px;
+  background: var(--dsw-alias-fill-tsp-secondary, var(--dsw-alias-button-ghost-active-fill));
   color: var(--dsw-alias-label-caption);
-  font-size: 10.5px;
+  font-size: 11px;
   font-variant-numeric: tabular-nums;
 }
 .dsh-av-tree-item[data-active="true"] .dsh-av-tree-count {
@@ -251,12 +249,12 @@ export const CSS_TEXT = `
   visibility: hidden;
   opacity: 0;
   flex: none;
-  width: 20px;
-  height: 20px;
+  width: 22px;
+  height: 22px;
   margin-right: 2px;
   padding: 0;
   border: none;
-  border-radius: 5px;
+  border-radius: 6px;
   background: transparent;
   color: var(--dsw-alias-label-tertiary);
   font-family: inherit;
@@ -264,7 +262,7 @@ export const CSS_TEXT = `
   cursor: pointer;
   transition: opacity 0.1s ease;
 }
-/* hover 与键盘 focus（:focus-within）都要显示，保证触屏与键盘可达。 */
+/* hover 与键盘 focus 都要显示，保证触屏与键盘可达。 */
 .dsh-av-tree-node:hover .dsh-av-tree-mini,
 .dsh-av-tree-node:focus-within .dsh-av-tree-mini {
   visibility: visible;
@@ -283,32 +281,32 @@ export const CSS_TEXT = `
 .dsh-av-tree-edit {
   flex: 1;
   min-width: 0;
-  height: 24px;
-  margin: 1px 4px;
-  padding: 0 8px;
+  height: 28px;
+  margin: 2px 4px;
+  padding: 0 10px;
   border: 1px solid var(--dsw-alias-state-business-primary, #3964fe);
-  border-radius: 6px;
+  border-radius: 7px;
   background: transparent;
   color: var(--dsw-alias-label-primary);
   font-family: inherit;
-  font-size: 12px;
+  font-size: 13px;
   outline: none;
 }
 .dsh-av-tree-foot {
   flex: none;
-  padding: 6px;
+  padding: 8px;
   border-top: 1px solid var(--dsw-alias-border-l2);
 }
 .dsh-av-tree-new {
   width: 100%;
-  height: 28px;
-  padding: 0 8px;
-  border: 1px dashed var(--dsw-alias-border-l2);
+  height: 32px;
+  padding: 0 10px;
+  border: 1px dashed var(--dsw-alias-border-l3, var(--dsw-alias-border-l2));
   border-radius: 8px;
   background: transparent;
   color: var(--dsw-alias-label-tertiary);
   font-family: inherit;
-  font-size: 12px;
+  font-size: 12.5px;
   cursor: pointer;
   transition: border-color 0.12s ease, color 0.12s ease, background 0.12s ease;
 }
@@ -324,17 +322,17 @@ export const CSS_TEXT = `
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
   overflow: hidden;
-  padding: 10px 14px 12px;
+  padding: 12px 16px 16px;
 }
 .dsh-av-note {
   flex: none;
-  padding: 6px 10px;
-  border-radius: 8px;
-  background: var(--dsw-alias-button-ghost-active-fill);
-  font-size: 11.5px;
-  line-height: 17px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: var(--dsw-alias-fill-tsp-secondary, var(--dsw-alias-button-ghost-active-fill));
+  font-size: 12px;
+  line-height: 18px;
   color: var(--dsw-alias-label-tertiary);
 }
 .dsh-av-list-head {
@@ -342,16 +340,17 @@ export const CSS_TEXT = `
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 0 2px;
+  padding: 0 4px;
+  min-height: 24px;
 }
 .dsh-av-list-head-label {
   color: var(--dsw-alias-label-secondary);
-  font-size: 12px;
+  font-size: 12.5px;
 }
 .dsh-av-list-head-count {
   margin-left: auto;
   color: var(--dsw-alias-label-tertiary);
-  font-size: 11.5px;
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
 .dsh-av-list {
@@ -360,18 +359,17 @@ export const CSS_TEXT = `
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 8px;
   margin: 0;
-  padding-right: 2px;
+  padding: 0;
 }
 .dsh-av-empty {
-  margin: 12px auto;
-  font-size: 12px;
-  line-height: 18px;
+  margin: 24px auto;
+  font-size: 13px;
+  line-height: 20px;
   color: var(--dsw-alias-label-tertiary);
 }
 
-/* ── 勾选框（与 shell 列表一致的外观） ── */
+/* ── 勾选框（对齐官方列表勾选观感） ── */
 .dsh-av-check {
   display: inline-flex;
   align-items: center;
@@ -391,12 +389,13 @@ export const CSS_TEXT = `
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 15px;
-  height: 15px;
+  width: 16px;
+  height: 16px;
   border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 4px;
+  border-radius: 5px;
   background: transparent;
   box-sizing: border-box;
+  transition: border-color 0.1s ease, background 0.1s ease;
 }
 .dsh-av-check input:checked + span {
   border-color: var(--dsw-alias-state-business-primary, #3964fe);
@@ -404,52 +403,52 @@ export const CSS_TEXT = `
 }
 .dsh-av-check input:checked + span::after {
   content: '';
-  width: 7px;
+  width: 8px;
   height: 4px;
-  border-left: 2px solid var(--dsw-alias-fg-on-accent, #fff);
-  border-bottom: 2px solid var(--dsw-alias-fg-on-accent, #fff);
+  border-left: 2px solid #fff;
+  border-bottom: 2px solid #fff;
   transform: rotate(-45deg) translate(0.5px, -0.5px);
 }
 .dsh-av-check:hover span {
-  border-color: var(--dsw-alias-border-l1);
+  border-color: var(--dsw-alias-label-dimmed);
 }
 .dsh-av-check input:focus-visible + span {
   outline: 2px solid var(--dsw-alias-state-business-primary, #3964fe);
   outline-offset: 1px;
 }
 
-/* ── 会话卡片 ── */
+/* ── 会话卡片（对齐官方 Card 模式：bg-layer-3 底 + hover 强化边框） ── */
 .dsh-av-row {
   flex: none;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 10px 12px;
+  gap: 10px;
+  padding: 14px 16px 12px;
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 12px;
-  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+  background: var(--dsw-alias-bg-layer-3);
+  transition: border-color 0.16s ease, background 0.16s ease;
 }
-.dsh-av-row:hover {
+.dsh-av-row:hover:not([data-checked="true"]) {
   border-color: var(--dsw-alias-label-dimmed);
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
 }
 .dsh-av-row[data-checked="true"] {
+  background: var(--dsw-alias-bg-layer-2);
   border-color: var(--dsw-alias-state-business-primary, #3964fe);
-  box-shadow: 0 0 0 1px var(--dsw-alias-state-business-primary, #3964fe) inset;
 }
 .dsh-av-row-head {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   min-width: 0;
 }
 .dsh-av-row-title {
   flex: 1;
   min-width: 0;
   overflow: hidden;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 500;
-  line-height: 20px;
+  line-height: 22px;
   color: var(--dsw-alias-label-primary);
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -457,22 +456,24 @@ export const CSS_TEXT = `
 .dsh-av-row-meta {
   flex: none;
   color: var(--dsw-alias-label-tertiary);
-  font-size: 11px;
-  line-height: 16px;
+  font-size: 12px;
+  line-height: 18px;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 .dsh-av-badge {
   flex: none;
   display: inline-flex;
   align-items: center;
-  height: 18px;
-  padding: 0 6px;
-  border-radius: 9px;
-  background: color-mix(in srgb, var(--dsw-alias-state-business-primary, #3964fe) 10%, transparent);
+  height: 20px;
+  padding: 0 8px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary, #3964fe) 12%, transparent);
   color: var(--dsw-alias-state-business-primary, #3964fe);
   font-size: 11px;
-  line-height: 18px;
-  max-width: 120px;
+  font-weight: 500;
+  line-height: 20px;
+  max-width: 140px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -483,35 +484,38 @@ export const CSS_TEXT = `
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+  padding-left: 28px;
 }
+/* 操作按钮：官方浅底 pill */
 .dsh-av-btn {
-  padding: 3px 10px;
-  border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 7px;
-  background: transparent;
+  height: 28px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-module-platform, var(--dsw-alias-bg-layer-2));
   color: var(--dsw-alias-label-secondary);
   font-family: inherit;
-  font-size: 12px;
+  font-size: 12.5px;
   cursor: pointer;
-  transition: background 0.1s ease, border-color 0.1s ease, color 0.1s ease;
+  transition: background 0.1s ease, color 0.1s ease;
 }
 .dsh-av-btn:hover:not(:disabled) {
   background: var(--dsw-alias-interactive-bg-hover);
-  border-color: var(--dsw-alias-border-l1);
+  color: var(--dsw-alias-label-primary);
 }
 .dsh-av-btn:disabled {
   opacity: 0.4;
   cursor: default;
 }
 .dsh-av-select {
-  height: 26px;
-  padding: 0 6px;
+  height: 28px;
+  padding: 0 8px;
   border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 7px;
-  background: transparent;
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-2);
   color: var(--dsw-alias-label-secondary);
   font-family: inherit;
-  font-size: 12px;
+  font-size: 12.5px;
   cursor: pointer;
   outline: none;
   transition: border-color 0.1s ease;
@@ -523,32 +527,31 @@ export const CSS_TEXT = `
 /* ── 收藏 + 便签 ── */
 .dsh-av-btn[data-bookmarked="true"] {
   color: var(--dsw-alias-state-business-primary, #3964fe);
-  border-color: var(--dsw-alias-state-business-primary, #3964fe);
-  background: color-mix(in srgb, var(--dsw-alias-state-business-primary, #3964fe) 8%, transparent);
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary, #3964fe) 12%, transparent);
 }
 .dsh-av-btn[data-has-note="true"] {
   color: var(--dsw-alias-label-primary);
-  border-color: var(--dsw-alias-border-l1);
+  background: var(--dsw-alias-interactive-bg-hover);
 }
 .dsh-av-note-editor {
   flex: none;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 8px 10px;
+  gap: 8px;
+  padding: 12px;
   border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 10px;
-  background: var(--dsw-alias-button-ghost-active-fill);
+  border-radius: 12px;
+  background: var(--dsw-alias-bg-layer-2);
 }
 .dsh-av-note-input {
-  min-height: 56px;
-  padding: 6px 8px;
+  min-height: 64px;
+  padding: 8px 10px;
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 8px;
   background: transparent;
   color: var(--dsw-alias-label-primary);
   font-family: inherit;
-  font-size: 12.5px;
+  font-size: 13px;
   line-height: 1.5;
   resize: vertical;
   outline: none;
@@ -565,35 +568,36 @@ export const CSS_TEXT = `
   gap: 8px;
 }
 .dsh-av-btn-primary {
-  border-color: var(--dsw-alias-state-business-primary, #3964fe);
   color: var(--dsw-alias-state-business-primary, #3964fe);
-  background: color-mix(in srgb, var(--dsw-alias-state-business-primary, #3964fe) 8%, transparent);
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary, #3964fe) 12%, transparent);
 }
 .dsh-av-btn-primary:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--dsw-alias-state-business-primary, #3964fe) 14%, transparent);
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary, #3964fe) 18%, transparent);
 }
+
+/* ── 对话日志 ── */
 .dsh-av-log {
   border-top: 1px dashed var(--dsw-alias-border-l2);
-  padding-top: 8px;
+  padding-top: 10px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
   max-height: 32vh;
   overflow-y: auto;
 }
 .dsh-av-msg {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 3px;
 }
 .dsh-av-msg-role {
-  font-size: 11px;
+  font-size: 11.5px;
   line-height: 16px;
   color: var(--dsw-alias-label-caption);
 }
 .dsh-av-msg-text {
-  font-size: 12.5px;
-  line-height: 1.55;
+  font-size: 13px;
+  line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-word;
   color: var(--dsw-alias-label-secondary);
@@ -603,7 +607,7 @@ export const CSS_TEXT = `
 }
 .dsh-av-log-error,
 .dsh-av-log-empty {
-  font-size: 12px;
+  font-size: 12.5px;
   line-height: 18px;
   color: var(--dsw-alias-label-tertiary);
 }
@@ -614,13 +618,13 @@ export const CSS_TEXT = `
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 14px;
+  padding: 10px 16px;
   border-top: 1px solid var(--dsw-alias-border-l2);
-  background: linear-gradient(to top, var(--dsw-alias-bg-layer-1, transparent), transparent);
+  background: var(--dsw-alias-bg-layer-1, transparent);
 }
 .dsh-av-batchbar-count {
   flex: none;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
   color: var(--dsw-alias-state-business-primary, #3964fe);
   margin-right: 4px;
@@ -635,7 +639,7 @@ export const CSS_TEXT = `
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
 }
 .dsh-av-library-toolbar {
   flex: none;
@@ -646,15 +650,16 @@ export const CSS_TEXT = `
 .dsh-av-search {
   flex: 1;
   min-width: 0;
-  height: 30px;
-  padding: 0 10px;
+  height: 32px;
+  padding: 0 12px;
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 8px;
-  background: transparent;
+  background: var(--dsw-alias-bg-layer-2);
   color: var(--dsw-alias-label-primary);
   font-family: inherit;
-  font-size: 12.5px;
+  font-size: 13px;
   outline: none;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
 }
 .dsh-av-search::placeholder {
   color: var(--dsw-alias-label-tertiary);
@@ -669,17 +674,18 @@ export const CSS_TEXT = `
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
 }
 .dsh-av-sm {
   flex: none;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 8px 10px;
+  gap: 8px;
+  padding: 14px 16px;
   border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 10px;
-  transition: border-color 0.12s ease;
+  border-radius: 12px;
+  background: var(--dsw-alias-bg-layer-3);
+  transition: border-color 0.16s ease;
 }
 .dsh-av-sm:hover {
   border-color: var(--dsw-alias-label-dimmed);
@@ -687,15 +693,15 @@ export const CSS_TEXT = `
 .dsh-av-sm-head {
   display: flex;
   align-items: baseline;
-  gap: 8px;
+  gap: 10px;
   min-width: 0;
 }
 .dsh-av-sm-goal {
   flex: 1;
   min-width: 0;
-  font-size: 12.5px;
-  font-weight: 500;
-  line-height: 19px;
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 20px;
   color: var(--dsw-alias-label-primary);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -703,7 +709,7 @@ export const CSS_TEXT = `
 }
 .dsh-av-sm-time {
   flex: none;
-  font-size: 11px;
+  font-size: 11.5px;
   line-height: 16px;
   color: var(--dsw-alias-label-tertiary);
   font-variant-numeric: tabular-nums;
@@ -711,29 +717,31 @@ export const CSS_TEXT = `
 .dsh-av-sm-body {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
 }
 .dsh-av-sm-item {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 3px;
 }
 .dsh-av-sm-label {
   font-size: 11px;
   font-weight: 600;
   line-height: 16px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
   color: var(--dsw-alias-label-caption);
 }
 .dsh-av-sm-list {
   margin: 0;
-  padding-left: 14px;
+  padding-left: 16px;
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 2px;
 }
 .dsh-av-sm-list li {
-  font-size: 12px;
-  line-height: 18px;
+  font-size: 12.5px;
+  line-height: 19px;
   color: var(--dsw-alias-label-secondary);
 }
 .dsh-av-sm-actions {
@@ -742,17 +750,18 @@ export const CSS_TEXT = `
   gap: 8px;
 }
 .dsh-av-btn-sm {
-  padding: 2px 8px;
-  font-size: 11px;
+  height: 24px;
+  padding: 0 10px;
+  font-size: 12px;
 }
 .dsh-av-sm-md {
   margin: 0;
-  padding: 8px 10px;
-  border-radius: 8px;
-  background: var(--dsw-alias-button-ghost-active-fill);
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--dsw-alias-fill-tsp-secondary, var(--dsw-alias-button-ghost-active-fill));
   font-family: var(--dsw-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-  font-size: 11.5px;
-  line-height: 1.5;
+  font-size: 12px;
+  line-height: 1.55;
   color: var(--dsw-alias-label-secondary);
   white-space: pre-wrap;
   word-break: break-word;
@@ -760,7 +769,7 @@ export const CSS_TEXT = `
   overflow-y: auto;
 }
 
-/* ── 右上角「关闭 dsh」按钮（会话头部 utilities 区） ── */
+/* ── 右上角「关闭 dsh」按钮 ── */
 .dsh-av-shutdown {
   display: inline-flex;
   align-items: center;
@@ -775,7 +784,7 @@ export const CSS_TEXT = `
   cursor: pointer;
 }
 .dsh-av-shutdown:hover:not(:disabled) {
-  background: var(--dsw-alias-interactive-bg-hover);
+  background: var(--dsw-alias-interactive-bg-hover-danger, var(--dsw-alias-interactive-bg-hover));
   color: var(--dsw-alias-state-error-primary);
 }
 .dsh-av-shutdown:disabled {
