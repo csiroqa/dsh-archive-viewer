@@ -11,6 +11,7 @@
 import { useState } from 'react'
 import { createPortal } from 'react-dom'
 import { ArchivePanelView } from './ArchivePanel.tsx'
+import { DeleteSessionButton } from './DeleteSessionButton.tsx'
 import { ShutdownButton } from './ShutdownButton.tsx'
 import { CSS_TEXT } from './style.ts'
 import type { ArchiveStores, ConnectionHandle, ViewerContext } from './types.ts'
@@ -94,4 +95,12 @@ export function apply(ctx: ViewerContext): void {
     order: 100,
     label: () => '关闭 dsh',
   }, ShutdownButton))
+
+  ctx.slots.inject('conversation.session.header.utilities', () => ctx.slots.register({
+    name: 'conversation.session.header.utilities',
+    id: 'archive-viewer-delete-session',
+    order: 90,
+    label: () => '删除当前会话',
+    inject: () => ({ stores }),
+  }, DeleteSessionButton))
 }

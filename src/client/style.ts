@@ -7,6 +7,32 @@
  */
 
 export const CSS_TEXT = `
+/* ── 几何令牌：本插件所有尺寸常量集中定义，禁止散落魔数 ── */
+:root {
+  /* 侧边栏入口 */
+  --dsh-av-rail-size: 36px;
+  --dsh-av-entry-height: 49px;
+  /* 面板 */
+  --dsh-av-gap: 12px;
+  --dsh-av-gap-y: 128px;
+  --dsh-av-width: 780px;
+  --dsh-av-width-max: calc(100vw - var(--dsh-av-gap) * 2);
+  --dsh-av-height: 76vh;
+  --dsh-av-radius: 14px;
+  /* 控件 */
+  --dsh-av-control-h: 28px;
+  --dsh-av-control-r: 8px;
+  --dsh-av-control-gap: 8px;
+  --dsh-av-font-size: 12.5px;
+  /* 树 */
+  --dsh-av-tree-w: 220px;
+  --dsh-av-tree-item-h: 32px;
+  --dsh-av-tree-item-r: 8px;
+  /* 卡片 */
+  --dsh-av-card-pad: 14px 16px 12px;
+  --dsh-av-card-r: 12px;
+}
+
 /* ── 侧边栏插件栏入口（sidebar.footer.action 列表项） ── */
 [data-dsh-archive-viewer-layer] {
   position: relative;
@@ -14,12 +40,12 @@ export const CSS_TEXT = `
   display: flex;
   align-items: center;
   width: 100%;
-  height: 49px;
+  height: var(--dsh-av-entry-height);
   margin: 8px 0 0;
 }
 [data-dsh-archive-viewer-layer][data-rail="true"] {
-  width: 36px;
-  height: 36px;
+  width: var(--dsh-av-rail-size);
+  height: var(--dsh-av-rail-size);
   margin: 0;
 }
 [data-dsh-archive-viewer-footer] {
@@ -36,7 +62,7 @@ export const CSS_TEXT = `
   align-items: center;
   gap: 8px;
   width: 100%;
-  height: 49px;
+  height: var(--dsh-av-entry-height);
   padding: 0 8px 0 6px;
   border: none;
   border-radius: 12px;
@@ -68,20 +94,20 @@ export const CSS_TEXT = `
   white-space: nowrap;
 }
 
-/* ── 面板（fixed 层叠；对齐官方浮层面板观感） ── */
+/* ── 面板（fixed 层叠；对齐官方浮层面板观感；几何见 :root 令牌区） ── */
 [data-dsh-archive-viewer-panel] {
   position: fixed;
-  left: 12px;
-  bottom: 128px;
+  left: var(--dsh-av-gap);
+  bottom: var(--dsh-av-gap-y);
   z-index: 30;
   display: flex;
   flex-direction: column;
-  width: 780px;
-  max-width: calc(100vw - 24px);
-  height: 76vh;
+  width: var(--dsh-av-width);
+  max-width: var(--dsh-av-width-max);
+  height: var(--dsh-av-height);
   overflow: hidden;
   border: 1px solid var(--dsw-alias-border-l1);
-  border-radius: 14px;
+  border-radius: var(--dsh-av-radius);
   background: var(--dsw-alias-bg-overlay, var(--dsw-alias-bg-base, #111418));
   box-shadow: var(--dsw-shadow-lv2);
   --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
@@ -113,11 +139,10 @@ export const CSS_TEXT = `
   font-variant-numeric: tabular-nums;
 }
 .dsh-av-close {
-  margin-left: auto;
-  height: 28px;
+  height: var(--dsh-av-control-h);
   padding: 0 12px;
   border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 8px;
+  border-radius: var(--dsh-av-control-r);
   background: var(--dsw-alias-bg-layer-2);
   color: var(--dsw-alias-label-secondary);
   font-family: inherit;
@@ -128,6 +153,44 @@ export const CSS_TEXT = `
 .dsh-av-close:hover {
   background: var(--dsw-alias-interactive-bg-hover);
   border-color: var(--dsw-alias-label-dimmed);
+}
+/* 头部右上角按钮组（最大化 / 刷新 / 关闭），统一文字按钮观感 */
+.dsh-av-header-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--dsh-av-control-gap);
+}
+.dsh-av-hbtn {
+  height: var(--dsh-av-control-h);
+  padding: 0 12px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsh-av-control-r);
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-secondary);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.dsh-av-hbtn:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover);
+  border-color: var(--dsw-alias-label-dimmed);
+}
+.dsh-av-hbtn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+/* 最大化：left+right 配对撑满横向（fixed 元素只设 left 时 width:auto 会收缩到内容宽） */
+[data-dsh-archive-viewer-panel][data-maximized="true"] {
+  left: var(--dsh-av-gap);
+  right: var(--dsh-av-gap);
+  top: var(--dsh-av-gap);
+  bottom: var(--dsh-av-gap);
+  width: auto;
+  max-width: none;
+  height: auto;
+  max-height: none;
 }
 .dsh-av-notice {
   flex: none;
@@ -778,8 +841,9 @@ export const CSS_TEXT = `
   overflow-y: auto;
 }
 
-/* ── 右上角「关闭 dsh」按钮 ── */
-.dsh-av-shutdown {
+/* ── 右上角「关闭 dsh」与「删除当前会话」按钮（同格式：圆形图标按钮） ── */
+.dsh-av-shutdown,
+.dsh-av-delete-session {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -792,11 +856,13 @@ export const CSS_TEXT = `
   color: var(--dsw-alias-label-tertiary);
   cursor: pointer;
 }
-.dsh-av-shutdown:hover:not(:disabled) {
+.dsh-av-shutdown:hover:not(:disabled),
+.dsh-av-delete-session:hover:not(:disabled) {
   background: var(--dsw-alias-interactive-bg-hover-danger, var(--dsw-alias-interactive-bg-hover));
   color: var(--dsw-alias-state-error-primary);
 }
-.dsh-av-shutdown:disabled {
+.dsh-av-shutdown:disabled,
+.dsh-av-delete-session:disabled {
   opacity: 0.5;
   cursor: default;
 }

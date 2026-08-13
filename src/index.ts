@@ -135,11 +135,15 @@ interface HostContext {
 /** RPC 信封的成功/失败结果（与 host-apiproxy 的 RpcResult 一致）。 */
 type RpcResult =
   | { ok: true; value: unknown }
-  | { ok: false; error: { code: string; message: string } }
+  | { ok: false; error: { code: string; message: string; details: Record<string, unknown> } }
 
 const ok = (value: unknown): RpcResult => ({ ok: true, value })
-const fail = (message: string, code = 'archive-viewer-error'): RpcResult =>
-  ({ ok: false, error: { code, message } })
+// 错误码必须落在官方 client 的 result schema 枚举内（bad-request / internal /
+// session-not-found / session-conflict 等），且每个枚举都强制要求 details 字段
+// （多数为 `{}`）——缺失会被 client 校验拒绝，整个错误退化成 transport 层报错。
+// message 无枚举限制，可用中文。
+const fail = (message: string, code: 'bad-request' | 'internal' | 'session-not-found' | 'session-conflict' = 'internal'): RpcResult =>
+  ({ ok: false, error: { code, message, details: {} } })
 
 /* ------------------------------------------------------------------ */
 /* 配置                                                               */
@@ -218,6 +222,8 @@ async function collectText(
   const deadline = new AbortController()
   const timer = setTimeout(() => deadline.abort(), timeoutMs)
   const onExternalAbort = (): void => deadline.abort()
+  // 预检：外部 signal 在调用前已取消（客户端提前断开）时立即中止，不再发起 LLM 流。
+  if (externalSignal?.aborted === true) deadline.abort()
   externalSignal?.addEventListener('abort', onExternalAbort, { once: true })
   try {
     for await (const chunk of llm.stream({ ...options, signal: deadline.signal })) {
@@ -262,9 +268,19 @@ function foldConversation(events: readonly SessionEvent[], maxBytes: number): {
     }
     const role = event.type === 'user/message' ? '用户' : '助手'
     const line = `[${role}] ${text}`
-    if (bytes + Buffer.byteLength(line, 'utf8') > maxBytes) break
+    const lineBytes = Buffer.byteLength(line, 'utf8')
+    // 超限时截断当前行（而非整条丢弃）：首条消息就超限时若 break，
+    // transcript 恒为空 → 该会话永远无法产生快照。
+    if (bytes + lineBytes > maxBytes) {
+      const room = Math.max(0, maxBytes - bytes)
+      if (room > 0) {
+        const prefix = Buffer.from(line, 'utf8').subarray(0, room).toString('utf8')
+        lines.push(prefix)
+      }
+      break
+    }
     lines.push(line)
-    bytes += Buffer.byteLength(line, 'utf8')
+    bytes += lineBytes
   }
   return { transcript: lines.join('\n\n'), title, updatedAt }
 }
@@ -377,9 +393,16 @@ async function snapshotDirEnsure(): Promise<string> {
 
 async function writeSnapshot(snapshot: ArchiveSnapshot): Promise<void> {
   const dir = await snapshotDirEnsure()
+  // 原子写（tmp+rename）：崩溃/断电不留下半写 JSON（否则快照永久丢失）。
+  const writeAtomic = async (name: string, content: string): Promise<void> => {
+    const target = join(dir, name)
+    const tmp = `${target}.tmp`
+    await writeFile(tmp, content, 'utf8')
+    await rename(tmp, target)
+  }
   await Promise.all([
-    writeFile(join(dir, jsonFilename(snapshot.sessionId)), JSON.stringify(snapshot, null, 2), 'utf8'),
-    writeFile(join(dir, mdFilename(snapshot.sessionId)), snapshot.summaryMarkdown, 'utf8'),
+    writeAtomic(jsonFilename(snapshot.sessionId), JSON.stringify(snapshot, null, 2)),
+    writeAtomic(mdFilename(snapshot.sessionId), snapshot.summaryMarkdown),
   ])
 }
 
@@ -682,46 +705,69 @@ const bookmarkStore = new BookmarkStore()
  *  4. 清理文件夹归属
  * workspace 注册表的 sessionIds 不在此处改写——持久化文件删除后，
  * 下一次启动 bootstrap 会以 header 重建，自动过滤已删会话。
- * @returns 删除是否成功（目标不存在视为失败并给出原因）。
+ * @returns 删除是否成功；失败带语义 code（session-conflict / session-not-found）。
  */
-async function deleteSession(ctx: HostContext, sessionId: SessionId): Promise<{ ok: true } | { ok: false; reason: string }> {
-  if (ctx.agents.get(sessionId)?.status === 'running') return { ok: false, reason: '运行中的会话不能删除' }
-
-  const headers = await ctx.sessionPersistence.list()
-  const header = headers.find(item => item.id === sessionId)
-  if (header === undefined) return { ok: false, reason: '会话不存在或尚未持久化' }
-
-  // 1) 删除会话日志文件（官方 locate 给出后端拥有的绝对路径）。
-  const location = ctx.sessionPersistence.locate(header)
-  if (location !== undefined) {
-    try {
-      await rm(location.path, { force: true })
-    } catch (error) {
-      return { ok: false, reason: `删除日志失败：${error instanceof Error ? error.message : String(error)}` }
-    }
+async function deleteSession(
+  ctx: HostContext,
+  sessionId: SessionId,
+): Promise<{ ok: true } | { ok: false; reason: string; code: 'session-conflict' | 'session-not-found' }> {
+  if (ctx.agents.get(sessionId)?.status === 'running') {
+    return { ok: false, reason: '运行中的会话不能删除', code: 'session-conflict' }
   }
 
-  // 2) 清理快照文件。
+  const headers = await ctx.sessionPersistence.list()
+  ctx.logger.info(`[archive-viewer] delete ${String(sessionId)}: persistence.list() returned ${headers.length} header(s)`)
+  const header = headers.find(item => item.id === sessionId)
+  if (header === undefined) {
+    // 幽灵条目：归档列表里有该 id 但持久化文件已不存在（此前删除/清理过）。
+    // 数据已不在，删除=清理残留引用（快照/书签/文件夹归属），直接视为成功。
+    const archivedRaw = ctx.workspaceRegistry.archivedSessionIds
+    const archived = new Set(typeof archivedRaw === 'function' ? archivedRaw() : archivedRaw ?? [])
+    if (archived.has(sessionId)) {
+      ctx.logger.info(`[archive-viewer] delete ${String(sessionId)}: ghost archive entry, data already gone`)
+      await cleanupSessionSidecars(ctx, sessionId)
+      return { ok: true }
+    }
+    ctx.logger.info(`[archive-viewer] delete ${String(sessionId)}: not found; first ids=${headers.slice(0, 10).map(item => String(item.id)).join(',')} keys=${Object.keys(headers[0] ?? {}).join(',')}`)
+    return { ok: false, reason: '会话不存在或尚未持久化', code: 'session-not-found' }
+  }
+
+  // 1) 删除会话日志文件（官方 locate 给出后端拥有的绝对路径）。
+  //    定位失败必须报错：文件仍在，重启后会话会复活（假成功比报错更危险）。
+  const location = ctx.sessionPersistence.locate(header)
+  if (location === undefined) {
+    return { ok: false, reason: '无法定位会话日志文件，未删除', code: 'session-not-found' }
+  }
+  try {
+    await rm(location.path, { force: true })
+  } catch (error) {
+    return { ok: false, reason: `删除日志失败：${error instanceof Error ? error.message : String(error)}`, code: 'session-not-found' }
+  }
+
+  await cleanupSessionSidecars(ctx, sessionId)
+
+  // workspace 注册表条目（archivedSessionIds / workspace sessionIds）无法在
+  // 运行时清除（官方无 unarchive/remove API，私有表被 cordis reflect 拦截），
+  // 由 browser 半区本地隐藏并持久化到 localStorage，重启 bootstrap 彻底移除。
+  return { ok: true }
+}
+
+/** 清理会话的衍生数据：归档快照（json+md）、书签条目、文件夹归属。 */
+async function cleanupSessionSidecars(ctx: HostContext, sessionId: SessionId): Promise<void> {
   await Promise.all([
     rm(join(snapshotDir(), jsonFilename(sessionId)), { force: true }).catch(() => undefined),
     rm(join(snapshotDir(), mdFilename(sessionId)), { force: true }).catch(() => undefined),
   ])
-
-  // 3) 清理书签条目。
   try {
     await bookmarkStore.removeForSession(sessionId)
   } catch (error) {
     ctx.logger.warn(`[archive-viewer] bookmark cleanup failed for ${String(sessionId)}: ${String(error)}`)
   }
-
-  // 4) 清理文件夹归属。
   try {
     await folderStore.removeForSession(sessionId)
   } catch (error) {
     ctx.logger.warn(`[archive-viewer] folder cleanup failed for ${String(sessionId)}: ${String(error)}`)
   }
-
-  return { ok: true }
 }
 
 /* ------------------------------------------------------------------ */
@@ -742,14 +788,17 @@ async function collectAutoArchiveCandidates(
   const archived = new Set(
     typeof archivedRaw === 'function' ? archivedRaw() : archivedRaw ?? [],
   )
-  const liveIds = new Set(ctx.sessions.list().map(session => session.id))
+  const live = ctx.sessions.list()
+  const liveIds = new Set(live.map(session => session.id))
   const candidates = new Set<SessionId>()
 
-  for (const session of ctx.sessions.list()) {
+  for (const session of live) {
     if (pinned.has(session.id) || archived.has(session.id)) continue
     if (ctx.agents.get(session.id)?.status === 'running') continue
     const updatedAt = session.events?.at(-1)?.time
-    if (updatedAt !== undefined && updatedAt < maxIdle) candidates.add(session.id)
+    // 无 events 的空壳会话用创建时间兜底（与冷会话同一粗筛逻辑），避免永远滞留。
+    const lastActive = updatedAt ?? session.header?.createdAt
+    if (lastActive !== undefined && lastActive < maxIdle) candidates.add(session.id)
   }
 
   // 冷会话（已持久化但不在 live 内存）：按 createdAt 粗筛 + 存档时间兜底。
@@ -824,25 +873,30 @@ async function snapshotSession(
   const { transcript, title, updatedAt } = foldConversation(events, config.maxInputBytes ?? DEFAULT_MAX_INPUT_BYTES)
   if (transcript === '') return null
 
-  const summary = await generateSummary(ctx, config, sessionId, transcript, externalSignal)
+  // 并发受限：多个 agent 同时 idle / 批量摘要时不打爆 provider 限流。
+  await summarySemaphore.acquire()
+  let summary: Awaited<ReturnType<typeof generateSummary>>
+  try {
+    summary = await generateSummary(ctx, config, sessionId, transcript, externalSignal)
+  } finally {
+    summarySemaphore.release()
+  }
+  // 快照时间 = 生成时刻（非最后活跃）：refresh 老会话时排序不漂移。
+  const snapshotAt = Date.now()
+  // LLM 失败时的降级摘要（首段截断文本）。
+  const fallback: ArchiveSnapshot['summary'] = {
+    goal: transcript.slice(0, 200),
+    decisions: [],
+    outcomes: [],
+    lessons: [],
+    openQuestions: [],
+  }
   const snapshot: ArchiveSnapshot = {
     sessionId,
     title,
-    archivedAt: updatedAt ?? Date.now(),
-    summaryMarkdown: summaryMarkdown(sessionId, title, summary ?? {
-      goal: transcript.slice(0, 200),
-      decisions: [],
-      outcomes: [],
-      lessons: [],
-      openQuestions: [],
-    }, updatedAt ?? Date.now()),
-    summary: summary ?? {
-      goal: transcript.slice(0, 200),
-      decisions: [],
-      outcomes: [],
-      lessons: [],
-      openQuestions: [],
-    },
+    archivedAt: snapshotAt,
+    summaryMarkdown: summaryMarkdown(sessionId, title, summary ?? { ...fallback }, snapshotAt),
+    summary: summary ?? { ...fallback },
   }
   await writeSnapshot(snapshot)
   return snapshot
@@ -851,6 +905,54 @@ async function snapshotSession(
 /* ------------------------------------------------------------------ */
 /* 插件入口                                                            */
 /* ------------------------------------------------------------------ */
+
+/** LLM 摘要并发上限（多个 agent 同时 idle 时不打爆 provider 限流）。 */
+const SUMMARY_CONCURRENCY = 2
+
+/** 简单信号量：串行化摘要生成，控制并发请求数。 */
+class Semaphore {
+  private queue: (() => void)[] = []
+  private active = 0
+  private readonly limit: number
+
+  constructor(limit: number) {
+    this.limit = limit
+  }
+
+  async acquire(): Promise<void> {
+    if (this.active < this.limit) {
+      this.active += 1
+      return
+    }
+    await new Promise<void>(resolve => { this.queue.push(resolve) })
+    this.active += 1
+  }
+
+  release(): void {
+    this.active -= 1
+    const next = this.queue.shift()
+    if (next !== undefined) next()
+  }
+}
+
+const summarySemaphore = new Semaphore(SUMMARY_CONCURRENCY)
+
+/** 归档扫描互斥锁：interval 与 RPC auto.run 共享，避免并发双扫描（重复 LLM 计费）。 */
+let archiveScanInFlight = false
+
+/**
+ * 执行一轮自动归档（带互斥）。若已有扫描在跑则直接跳过。
+ * @returns 本次实际执行的归档数量；被跳过时返回 0。
+ */
+async function runArchiveScanGuarded(ctx: HostContext, config: ArchiveViewerConfig): Promise<number> {
+  if (archiveScanInFlight) return 0
+  archiveScanInFlight = true
+  try {
+    return await runArchiveScan(ctx, config)
+  } finally {
+    archiveScanInFlight = false
+  }
+}
 
 /**
  * Mount the host half.
@@ -865,16 +967,12 @@ export function apply(ctx: HostContext, config: ArchiveViewerConfig): () => void
   // 自动定期归档：周期扫描（间隔 ≥ 1 分钟，防抖）。
   if (cfg.autoArchiveEnabled !== false) {
     const minutes = Math.max(1, cfg.scanIntervalMinutes ?? DEFAULT_SCAN_MINUTES)
-    let scanning = false
     disposers.push(ctx.interval(() => {
-      if (scanning) return
-      scanning = true
-      void runArchiveScan(ctx, cfg)
-        .then(async (count) => {
+      void runArchiveScanGuarded(ctx, cfg)
+        .then(count => {
           if (count > 0) ctx.logger.info(`[archive-viewer] auto-archived ${count} idle session(s)`)
         })
         .catch(error => ctx.logger.error(`[archive-viewer] archive scan failed: ${String(error)}`))
-        .finally(() => { scanning = false })
     }, minutes * 60 * 1000))
     ctx.logger.info(`[archive-viewer] auto-archive scan every ${minutes} minute(s)`)
   }
@@ -908,22 +1006,22 @@ export function apply(ctx: HostContext, config: ArchiveViewerConfig): () => void
           const sessionId = (payload as { sessionId?: unknown } | null)?.sessionId
           if (typeof sessionId !== 'string' || sessionId === '') return fail('sessionId is required', 'bad-request')
           const snapshot = await readSnapshot(sessionId)
-          return snapshot === undefined
-            ? fail('no snapshot for this session', 'not-found')
-            : ok(snapshot)
+          // 无快照是正常业务状态而非错误：ok(null) 让 client 侧可区分
+          // （value 槽可选，null 合法，不会触发枚举校验）。
+          return ok(snapshot ?? null)
         }
         case 'archive.summary.refresh': {
           const sessionId = (payload as { sessionId?: unknown } | null)?.sessionId
           if (typeof sessionId !== 'string' || sessionId === '') return fail('sessionId is required', 'bad-request')
-          if (!(cfg.summarizeEnabled ?? true)) return fail('摘要功能未开启（插件配置 summarizeEnabled=false）', 'disabled')
-          if (cfg.provider === undefined || cfg.model === undefined) return fail('摘要模型未配置（插件 config 需 provider/model）', 'misconfigured')
+          if (!(cfg.summarizeEnabled ?? true)) return fail('摘要功能未开启（插件配置 summarizeEnabled=false）', 'internal')
+          if (cfg.provider === undefined || cfg.model === undefined) return fail('摘要模型未配置（插件 config 需 provider/model）', 'internal')
           const snapshot = await snapshotSession(ctx, cfg, sessionId as SessionId, true, signal)
           return snapshot === null
-            ? fail('该会话没有可摘要的对话内容', 'empty')
+            ? fail('该会话没有可摘要的对话内容', 'internal')
             : ok(snapshot)
         }
         case 'archive.auto.run': {
-          const count = await runArchiveScan(ctx, cfg)
+          const count = await runArchiveScanGuarded(ctx, cfg)
           return ok({ archived: count })
         }
         case 'archive.auto.status': {
@@ -942,7 +1040,10 @@ export function apply(ctx: HostContext, config: ArchiveViewerConfig): () => void
           const name = (payload as { name?: unknown } | null)?.name
           if (typeof name !== 'string' || name.trim() === '') return fail('folder name is required', 'bad-request')
           if (name.trim().length > 64) return fail('folder name is too long (max 64 chars)', 'bad-request')
-          return ok({ folders: await folderStore.list(), assignment: await folderStore.assignmentOf(), created: await folderStore.create(name.trim()) })
+          // 先 create 再 list：返回的 folders 必须包含刚创建的新文件夹，
+          // 否则 UI 树用该响应渲染时看不到新文件夹（表现为「无反应」）。
+          const created = await folderStore.create(name.trim())
+          return ok({ folders: await folderStore.list(), assignment: await folderStore.assignmentOf(), created })
         }
         case 'archive.folder.rename': {
           const p = payload as { folderId?: unknown; name?: unknown } | null
@@ -950,14 +1051,14 @@ export function apply(ctx: HostContext, config: ArchiveViewerConfig): () => void
           if (typeof p.name !== 'string' || p.name.trim() === '') return fail('folder name is required', 'bad-request')
           if (p.name.trim().length > 64) return fail('folder name is too long (max 64 chars)', 'bad-request')
           const renamed = await folderStore.rename(p.folderId, p.name.trim())
-          if (renamed === undefined) return fail('folder not found', 'not-found')
+          if (renamed === undefined) return fail('folder not found', 'internal')
           return ok({ folders: await folderStore.list(), assignment: await folderStore.assignmentOf() })
         }
         case 'archive.folder.remove': {
           const p = payload as { folderId?: unknown } | null
           if (typeof p?.folderId !== 'string' || p.folderId === '') return fail('folderId is required', 'bad-request')
           const removed = await folderStore.remove(p.folderId)
-          if (!removed) return fail('folder not found', 'not-found')
+          if (!removed) return fail('folder not found', 'internal')
           return ok({ folders: await folderStore.list(), assignment: await folderStore.assignmentOf() })
         }
         case 'archive.folder.move': {
@@ -965,7 +1066,7 @@ export function apply(ctx: HostContext, config: ArchiveViewerConfig): () => void
           if (typeof p?.sessionId !== 'string' || p.sessionId === '') return fail('sessionId is required', 'bad-request')
           if (p.folderId !== undefined && typeof p.folderId !== 'string') return fail('invalid folderId', 'bad-request')
           const after = await folderStore.move(p.sessionId, p.folderId === '' ? undefined : p.folderId)
-          if (after === undefined) return fail('folder not found', 'not-found')
+          if (after === undefined) return fail('folder not found', 'internal')
           return ok({ folders: after, assignment: await folderStore.assignmentOf() })
         }
         case 'bookmark.list': {
@@ -992,15 +1093,15 @@ export function apply(ctx: HostContext, config: ArchiveViewerConfig): () => void
           const result = await deleteSession(ctx, p.sessionId as SessionId)
           return result.ok
             ? ok({ deleted: true })
-            : fail(result.reason, 'delete-failed')
+            : fail(result.reason, result.code)
         }
         default:
-          return fail(`unknown endpoint ${JSON.stringify(endpoint)}`, 'unknown-endpoint')
+          return fail(`unknown endpoint ${JSON.stringify(endpoint)}`, 'internal')
       }
     } catch (error) {
       ctx.logger.error(`[archive-viewer] rpc ${JSON.stringify(endpoint)} failed: ${String(error)}`)
       // 原始错误保留在日志；对用户只给固定中文文案，避免泄露实现细节。
-      return fail('操作失败，请查看 dsh 日志', 'handler-error')
+      return fail('操作失败，请查看 dsh 日志', 'internal')
     }
   }, { authority: 'loopback' })
   disposers.push(() => { void dispose().catch(() => undefined) })
