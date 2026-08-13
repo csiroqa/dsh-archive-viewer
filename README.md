@@ -107,4 +107,5 @@ dsh plugin --profile web add link:E:\path\to\dsh-archive-viewer   # Windows
 ## 相关
 
 - [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
+- 同系列插件：[dsh-schedule](https://github.com/csiroqa/dsh-schedule)（cron 定时任务 + 状态监控）
 - 插件形态参考 [dsh-web-ui](https://github.com/zhu1090093659/dsh-web-ui)（`dsh.bundle.patch` + `dsh.client` 声明 + 槽位注册）
