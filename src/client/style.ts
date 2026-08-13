@@ -205,7 +205,7 @@ export const CSS_TEXT = `
   font-weight: 500;
 }
 .dsh-av-tree-item[data-active="true"] .dsh-av-tree-icon {
-  color: var(--ln-primary, #3964fe);
+  color: var(--dsw-alias-state-business-primary, #3964fe);
 }
 .dsh-av-tree-item[data-indent="true"] {
   padding-left: 26px;
@@ -248,7 +248,8 @@ export const CSS_TEXT = `
   border-radius: 8px;
 }
 .dsh-av-tree-node .dsh-av-tree-mini {
-  display: none;
+  visibility: hidden;
+  opacity: 0;
   flex: none;
   width: 20px;
   height: 20px;
@@ -261,8 +262,13 @@ export const CSS_TEXT = `
   font-family: inherit;
   font-size: 11px;
   cursor: pointer;
+  transition: opacity 0.1s ease;
 }
-.dsh-av-tree-node:hover .dsh-av-tree-mini {
+/* hover 与键盘 focus（:focus-within）都要显示，保证触屏与键盘可达。 */
+.dsh-av-tree-node:hover .dsh-av-tree-mini,
+.dsh-av-tree-node:focus-within .dsh-av-tree-mini {
+  visibility: visible;
+  opacity: 1;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -280,7 +286,7 @@ export const CSS_TEXT = `
   height: 24px;
   margin: 1px 4px;
   padding: 0 8px;
-  border: 1px solid var(--dsw-alias-border-focus, var(--dsw-alias-border-l1));
+  border: 1px solid var(--dsw-alias-state-business-primary, #3964fe);
   border-radius: 6px;
   background: transparent;
   color: var(--dsw-alias-label-primary);
@@ -307,9 +313,9 @@ export const CSS_TEXT = `
   transition: border-color 0.12s ease, color 0.12s ease, background 0.12s ease;
 }
 .dsh-av-tree-new:hover {
-  border-color: var(--ln-primary, #3964fe);
-  color: var(--ln-primary, #3964fe);
-  background: color-mix(in srgb, var(--ln-primary, #3964fe) 8%, transparent);
+  border-color: var(--dsw-alias-state-business-primary, #3964fe);
+  color: var(--dsw-alias-state-business-primary, #3964fe);
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary, #3964fe) 8%, transparent);
 }
 
 /* ── 右栏 ── */
@@ -393,8 +399,8 @@ export const CSS_TEXT = `
   box-sizing: border-box;
 }
 .dsh-av-check input:checked + span {
-  border-color: var(--ln-primary, #3964fe);
-  background: var(--ln-primary, #3964fe);
+  border-color: var(--dsw-alias-state-business-primary, #3964fe);
+  background: var(--dsw-alias-state-business-primary, #3964fe);
 }
 .dsh-av-check input:checked + span::after {
   content: '';
@@ -406,6 +412,10 @@ export const CSS_TEXT = `
 }
 .dsh-av-check:hover span {
   border-color: var(--dsw-alias-border-l1);
+}
+.dsh-av-check input:focus-visible + span {
+  outline: 2px solid var(--dsw-alias-state-business-primary, #3964fe);
+  outline-offset: 1px;
 }
 
 /* ── 会话卡片 ── */
@@ -420,12 +430,12 @@ export const CSS_TEXT = `
   transition: border-color 0.12s ease, box-shadow 0.12s ease;
 }
 .dsh-av-row:hover {
-  border-color: var(--dsw-alias-border-l1);
+  border-color: var(--dsw-alias-label-dimmed);
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
 }
 .dsh-av-row[data-checked="true"] {
-  border-color: var(--ln-primary, #3964fe);
-  box-shadow: 0 0 0 1px var(--ln-primary, #3964fe) inset;
+  border-color: var(--dsw-alias-state-business-primary, #3964fe);
+  box-shadow: 0 0 0 1px var(--dsw-alias-state-business-primary, #3964fe) inset;
 }
 .dsh-av-row-head {
   display: flex;
@@ -458,8 +468,8 @@ export const CSS_TEXT = `
   height: 18px;
   padding: 0 6px;
   border-radius: 9px;
-  background: color-mix(in srgb, var(--ln-primary, #3964fe) 10%, transparent);
-  color: var(--ln-primary, #3964fe);
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary, #3964fe) 10%, transparent);
+  color: var(--dsw-alias-state-business-primary, #3964fe);
   font-size: 11px;
   line-height: 18px;
   max-width: 120px;
@@ -507,14 +517,14 @@ export const CSS_TEXT = `
   transition: border-color 0.1s ease;
 }
 .dsh-av-select:focus {
-  border-color: var(--ln-primary, #3964fe);
+  border-color: var(--dsw-alias-state-business-primary, #3964fe);
 }
 
 /* ── 收藏 + 便签 ── */
 .dsh-av-btn[data-bookmarked="true"] {
-  color: var(--ln-primary, #3964fe);
-  border-color: var(--ln-primary, #3964fe);
-  background: color-mix(in srgb, var(--ln-primary, #3964fe) 8%, transparent);
+  color: var(--dsw-alias-state-business-primary, #3964fe);
+  border-color: var(--dsw-alias-state-business-primary, #3964fe);
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary, #3964fe) 8%, transparent);
 }
 .dsh-av-btn[data-has-note="true"] {
   color: var(--dsw-alias-label-primary);
@@ -544,7 +554,7 @@ export const CSS_TEXT = `
   outline: none;
 }
 .dsh-av-note-input:focus {
-  border-color: var(--ln-primary, #3964fe);
+  border-color: var(--dsw-alias-state-business-primary, #3964fe);
 }
 .dsh-av-note-input::placeholder {
   color: var(--dsw-alias-label-tertiary);
@@ -555,12 +565,12 @@ export const CSS_TEXT = `
   gap: 8px;
 }
 .dsh-av-btn-primary {
-  border-color: var(--ln-primary, #3964fe);
-  color: var(--ln-primary, #3964fe);
-  background: color-mix(in srgb, var(--ln-primary, #3964fe) 8%, transparent);
+  border-color: var(--dsw-alias-state-business-primary, #3964fe);
+  color: var(--dsw-alias-state-business-primary, #3964fe);
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary, #3964fe) 8%, transparent);
 }
 .dsh-av-btn-primary:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--ln-primary, #3964fe) 14%, transparent);
+  background: color-mix(in srgb, var(--dsw-alias-state-business-primary, #3964fe) 14%, transparent);
 }
 .dsh-av-log {
   border-top: 1px dashed var(--dsw-alias-border-l2);
@@ -588,11 +598,6 @@ export const CSS_TEXT = `
   word-break: break-word;
   color: var(--dsw-alias-label-secondary);
 }
-.dsh-av-msg-block {
-  font-size: 11px;
-  font-style: italic;
-  color: var(--dsw-alias-label-tertiary);
-}
 .dsh-av-load-older {
   align-self: flex-start;
 }
@@ -617,7 +622,7 @@ export const CSS_TEXT = `
   flex: none;
   font-size: 12px;
   font-weight: 600;
-  color: var(--ln-primary, #3964fe);
+  color: var(--dsw-alias-state-business-primary, #3964fe);
   margin-right: 4px;
 }
 .dsh-av-batchbar-move {
@@ -655,8 +660,8 @@ export const CSS_TEXT = `
   color: var(--dsw-alias-label-tertiary);
 }
 .dsh-av-search:focus {
-  border-color: var(--ln-primary, #3964fe);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--ln-primary, #3964fe) 18%, transparent);
+  border-color: var(--dsw-alias-state-business-primary, #3964fe);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--dsw-alias-state-business-primary, #3964fe) 18%, transparent);
 }
 .dsh-av-sm-list-wrap {
   flex: 1;
@@ -677,7 +682,7 @@ export const CSS_TEXT = `
   transition: border-color 0.12s ease;
 }
 .dsh-av-sm:hover {
-  border-color: var(--dsw-alias-border-l1);
+  border-color: var(--dsw-alias-label-dimmed);
 }
 .dsh-av-sm-head {
   display: flex;
@@ -745,7 +750,7 @@ export const CSS_TEXT = `
   padding: 8px 10px;
   border-radius: 8px;
   background: var(--dsw-alias-button-ghost-active-fill);
-  font-family: var(--dsw-alias-font-mono, ui-monospace, monospace);
+  font-family: var(--dsw-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
   font-size: 11.5px;
   line-height: 1.5;
   color: var(--dsw-alias-label-secondary);

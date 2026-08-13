@@ -282,9 +282,12 @@ function useSessionLog(
     setLoading(true)
     setError(null)
     void fetchPage(undefined).then((page) => {
-      if (cancelled || page === null) return
-      setEvents(page.events)
-      setHasMore(page.hasMore)
+      if (cancelled) return
+      // 失败路径也必须复位 loading，否则「正在读取对话…」永远转圈且无法重试。
+      if (page !== null) {
+        setEvents(page.events)
+        setHasMore(page.hasMore)
+      }
       setLoading(false)
     })
     return () => { cancelled = true }
@@ -296,7 +299,10 @@ function useSessionLog(
     if (beforeSeq === undefined) return
     setLoading(true)
     void fetchPage(beforeSeq).then((page) => {
-      if (page === null) return
+      if (page === null) {
+        setLoading(false)
+        return
+      }
       setEvents(prev => [...page.events, ...prev])
       setHasMore(page.hasMore)
       setLoading(false)
@@ -381,16 +387,20 @@ function KnowledgeLibrary(props: {
   const [refreshing, setRefreshing] = useState<string | null>(null)
   const [query, setQuery] = useState('')
 
+  // ref 稳定化：onNotice 每次渲染可能换引用，直接进依赖会让 load 不稳定 → 重发 RPC。
+  const onNoticeRef = useRef(onNotice)
+  useEffect(() => { onNoticeRef.current = onNotice })
+
   const load = useCallback(async () => {
     setLoading(true)
     try {
       setSnapshots(await listSummariesRpc(connection))
     } catch (cause) {
-      onNotice(`读取经验库失败：${cause instanceof Error ? cause.message : String(cause)}`, 'error')
+      onNoticeRef.current(`读取经验库失败：${cause instanceof Error ? cause.message : String(cause)}`, 'error')
     } finally {
       setLoading(false)
     }
-  }, [connection, onNotice])
+  }, [connection])
 
   useEffect(() => { void load() }, [load])
 
@@ -400,11 +410,11 @@ function KnowledgeLibrary(props: {
       await readSummaryRpc(connection, sessionId, true)
       await load()
     } catch (cause) {
-      onNotice(`摘要生成失败：${cause instanceof Error ? cause.message : String(cause)}`, 'error')
+      onNoticeRef.current(`摘要生成失败：${cause instanceof Error ? cause.message : String(cause)}`, 'error')
     } finally {
       setRefreshing(null)
     }
-  }, [connection, load, onNotice])
+  }, [connection, load])
 
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase()
@@ -473,52 +483,56 @@ function useFolderState(connection: ConnectionHandle | undefined, onError: (text
   const [assignment, setAssignment] = useState<Readonly<Record<string, string>>>({})
   const [loading, setLoading] = useState(true)
 
+  // ref 稳定化：onError 每次渲染可能换引用，直接进依赖会让 apply/reload 不稳定 → 重发 RPC。
+  const onErrorRef = useRef(onError)
+  useEffect(() => { onErrorRef.current = onError })
+
   const apply = useCallback(async (action: 'list' | 'create' | 'rename' | 'remove' | 'move', params?: { name?: string; folderId?: string; sessionId?: string; folderId2?: string }) => {
     if (connection === undefined) {
-      onError('connection 服务不可用')
+      onErrorRef.current('归档数据服务未连接，部分功能不可用')
       return
     }
     const payload = await folderRpc(connection, action, params)
     setFolders(payload.folders)
     setAssignment(payload.assignment)
-  }, [connection, onError])
+  }, [connection])
 
   const reload = useCallback(async () => {
     setLoading(true)
     try {
       await apply('list')
     } catch (cause) {
-      onError(`读取文件夹失败：${cause instanceof Error ? cause.message : String(cause)}`)
+      onErrorRef.current(`读取文件夹失败：${cause instanceof Error ? cause.message : String(cause)}`)
     } finally {
       setLoading(false)
     }
-  }, [apply, onError])
+  }, [apply])
 
   useEffect(() => { void reload() }, [reload])
 
   const createFolder = useCallback(async (name: string) => {
     try { await apply('create', { name }) } catch (cause) {
-      onError(`新建文件夹失败：${cause instanceof Error ? cause.message : String(cause)}`)
+      onErrorRef.current(`新建文件夹失败：${cause instanceof Error ? cause.message : String(cause)}`)
     }
-  }, [apply, onError])
+  }, [apply])
 
   const renameFolder = useCallback(async (folderId: string, name: string) => {
     try { await apply('rename', { folderId, name }) } catch (cause) {
-      onError(`重命名失败：${cause instanceof Error ? cause.message : String(cause)}`)
+      onErrorRef.current(`重命名失败：${cause instanceof Error ? cause.message : String(cause)}`)
     }
-  }, [apply, onError])
+  }, [apply])
 
   const removeFolder = useCallback(async (folderId: string) => {
     try { await apply('remove', { folderId }) } catch (cause) {
-      onError(`删除失败：${cause instanceof Error ? cause.message : String(cause)}`)
+      onErrorRef.current(`删除失败：${cause instanceof Error ? cause.message : String(cause)}`)
     }
-  }, [apply, onError])
+  }, [apply])
 
   const moveSession = useCallback(async (sessionId: string, folderId: string | undefined) => {
     try { await apply('move', { sessionId, folderId2: folderId ?? '' }) } catch (cause) {
-      onError(`移动失败：${cause instanceof Error ? cause.message : String(cause)}`)
+      onErrorRef.current(`移动失败：${cause instanceof Error ? cause.message : String(cause)}`)
     }
-  }, [apply, onError])
+  }, [apply])
 
   return { folders, assignment, loading, reload, createFolder, renameFolder, removeFolder, moveSession }
 }
@@ -532,23 +546,27 @@ function useBookmarkState(connection: ConnectionHandle | undefined, onError: (te
 } {
   const [bookmarks, setBookmarks] = useState<readonly BookmarkEntry[]>([])
 
+  // ref 稳定化：onError 每次渲染可能换引用，直接进依赖会让 apply/effect 不稳定 → 重发 RPC。
+  const onErrorRef = useRef(onError)
+  useEffect(() => { onErrorRef.current = onError })
+
   const apply = useCallback(async (action: 'list' | 'toggle' | 'note', params?: { sessionId?: string; note?: string }) => {
     if (connection === undefined) {
-      onError('connection 服务不可用')
+      onErrorRef.current('归档数据服务未连接，部分功能不可用')
       return
     }
     const payload = await bookmarkRpc(connection, action, params)
     setBookmarks(payload.bookmarks)
-  }, [connection, onError])
+  }, [connection])
 
   useEffect(() => {
     let cancelled = false
     if (connection === undefined) return
     void bookmarkRpc(connection, 'list')
       .then(payload => { if (!cancelled) setBookmarks(payload.bookmarks) })
-      .catch(cause => { if (!cancelled) onError(`读取收藏失败：${cause instanceof Error ? cause.message : String(cause)}`) })
+      .catch(cause => { if (!cancelled) onErrorRef.current(`读取收藏失败：${cause instanceof Error ? cause.message : String(cause)}`) })
     return () => { cancelled = true }
-  }, [connection, onError])
+  }, [connection])
 
   const bySession = useMemo(() => {
     const map: Record<string, BookmarkEntry> = {}
@@ -558,15 +576,15 @@ function useBookmarkState(connection: ConnectionHandle | undefined, onError: (te
 
   const toggle = useCallback(async (sessionId: string) => {
     try { await apply('toggle', { sessionId }) } catch (cause) {
-      onError(`收藏操作失败：${cause instanceof Error ? cause.message : String(cause)}`)
+      onErrorRef.current(`收藏操作失败：${cause instanceof Error ? cause.message : String(cause)}`)
     }
-  }, [apply, onError])
+  }, [apply])
 
   const setNote = useCallback(async (sessionId: string, note: string) => {
     try { await apply('note', { sessionId, note }) } catch (cause) {
-      onError(`便签保存失败：${cause instanceof Error ? cause.message : String(cause)}`)
+      onErrorRef.current(`便签保存失败：${cause instanceof Error ? cause.message : String(cause)}`)
     }
-  }, [apply, onError])
+  }, [apply])
 
   return { bookmarks, bySession, toggle, setNote }
 }
@@ -575,6 +593,7 @@ function useBookmarkState(connection: ConnectionHandle | undefined, onError: (te
 function FolderTree(props: {
   folders: readonly ArchiveFolder[]
   assignment: Readonly<Record<string, string>>
+  archivedIds: readonly string[]
   totalCount: number
   bookmarkCount: number
   selected: string
@@ -584,8 +603,12 @@ function FolderTree(props: {
   onRemove(folderId: string): void
   libraryCount: number
 }): JSX.Element {
-  const { folders, totalCount, selected, onSelect, onCreate, onRename, onRemove, libraryCount, bookmarkCount } = props
-  const unclassified = totalCount - Object.keys(props.assignment).length
+  const { folders, totalCount, selected, onSelect, onCreate, onRename, onRemove, libraryCount, bookmarkCount, archivedIds } = props
+  // 计数只统计仍处于归档态的会话：assignment 可能残留已恢复会话的条目。
+  const archivedSet = new Set(archivedIds)
+  const countedIds = Object.keys(props.assignment).filter(id => archivedSet.has(id))
+  const unclassified = totalCount - countedIds.length
+  const folderCount = (folderId: string): number => countedIds.filter(id => props.assignment[id] === folderId).length
   const [creating, setCreating] = useState(false)
   const [draft, setDraft] = useState('')
   const [editing, setEditing] = useState<string | null>(null)
@@ -650,7 +673,7 @@ function FolderTree(props: {
                     <span className="dsh-av-tree-icon">▸</span>
                     <span className="dsh-av-tree-label">{folder.name}</span>
                     <span className="dsh-av-tree-count">
-                      {Object.values(props.assignment).filter(id => id === folder.id).length}
+                      {folderCount(folder.id)}
                     </span>
                   </button>
                   <button
@@ -723,8 +746,10 @@ function ArchiveRow(props: {
 
   const commitNote = useCallback(() => {
     setNoteOpen(false)
-    if (noteDraft.trim() === (bookmark?.note ?? '')) return
-    onSaveNote(sessionId, noteDraft)
+    const trimmed = noteDraft.trim()
+    // 两侧都 trim 后比较，避免「只删了尾部空格」被误判为未修改。
+    if (trimmed === (bookmark?.note ?? '').trim()) return
+    onSaveNote(sessionId, trimmed)
   }, [noteDraft, bookmark, onSaveNote, sessionId])
 
   const loadSummary = useCallback(async (refresh: boolean) => {
@@ -735,7 +760,7 @@ function ArchiveRow(props: {
       setSummary(snapshot)
       if (snapshot !== null) onNotice(sessionId, '摘要已就绪')
     } catch (cause) {
-      onNotice(sessionId, `摘要读取失败：${cause instanceof Error ? cause.message : String(cause)}`, 'error')
+      onNotice(sessionId, `摘要操作失败：${cause instanceof Error ? cause.message : String(cause)}`, 'error')
     } finally {
       setSummaryLoading(false)
     }
@@ -779,7 +804,7 @@ function ArchiveRow(props: {
           type="button"
           className="dsh-av-btn"
           disabled={summaryLoading || busyAction !== null}
-          onClick={() => void (summary === null ? loadSummary(false) : loadSummary(true))}
+          onClick={() => void loadSummary(true)}
         >
           {summaryLoading ? '生成中…' : summary === null ? '生成摘要' : '重新生成'}
         </button>
@@ -807,10 +832,10 @@ function ArchiveRow(props: {
           className="dsh-av-select"
           title="移动到文件夹"
           value=""
-          onChange={event => { if (event.target.value !== '') onMoveTo(event.target.value) }}
+          onChange={event => { onMoveTo(event.target.value === '__unclassified__' ? undefined : event.target.value) }}
         >
           <option value="" disabled>移动至…</option>
-          <option value="">未分类</option>
+          <option value="__unclassified__">未分类</option>
           {folders.map(folder => <option key={folder.id} value={folder.id}>{folder.name}</option>)}
         </select>
         <button type="button" className="dsh-av-btn" disabled={busyAction !== null} onClick={() => void runAction('unarchive')}>
@@ -896,8 +921,19 @@ export function ArchivePanelView(props: { stores: ArchiveStores; onClose(): void
     setNotices(prev => ({ ...prev, [sessionId]: { text, kind } }))
   }, [])
 
-  const folderState = useFolderState(stores.connection, (text) => setBanner({ text, kind: 'error' }))
-  const bookmarkState = useBookmarkState(stores.connection, (text) => setBanner({ text, kind: 'error' }))
+  // 统一 banner：清除旧定时器 → 设置 → 5s 自动消失（所有路径共用，避免旧 timer 提前清新 banner）。
+  const flashBanner = useCallback((text: string, kind?: 'error') => {
+    setBanner({ text, kind })
+    window.clearTimeout(bannerTimer.current)
+    bannerTimer.current = window.setTimeout(() => setBanner(null), 5000)
+  }, [])
+
+  // 稳定引用：folder/bookmark 的 onError 与 KnowledgeLibrary 的 onNotice 都用它，
+  // 避免内联箭头导致依赖不稳定 → RPC 无限循环。
+  const reportError = useCallback((text: string) => { flashBanner(text, 'error') }, [flashBanner])
+
+  const folderState = useFolderState(stores.connection, reportError)
+  const bookmarkState = useBookmarkState(stores.connection, reportError)
 
   const displayRows = useMemo<readonly ArchiveRowInfo[]>(() => {
     const makeRow = (id: SessionId): ArchiveRowInfo => {
@@ -953,30 +989,32 @@ export function ArchivePanelView(props: { stores: ArchiveStores; onClose(): void
   }, [displayRows])
 
   const onUnarchive = useCallback(async (sessionId: string) => {
-    try {
-      await unarchiveSessionRpc(sessionId)
-      setBanner({ text: '会话已恢复，已回到原工作区分组' })
-      setChecked(prev => { const next = new Set(prev); next.delete(sessionId); return next })
-    } catch (cause) {
-      setBanner({ text: `恢复失败：${cause instanceof Error ? cause.message : String(cause)}`, kind: 'error' })
-    }
-    window.clearTimeout(bannerTimer.current)
-    bannerTimer.current = window.setTimeout(() => setBanner(null), 5000)
-  }, [])
+    await unarchiveSessionRpc(sessionId)
+    setChecked(prev => { const next = new Set(prev); next.delete(sessionId); return next })
+    flashBanner('会话已恢复，已回到原工作区分组')
+  }, [flashBanner])
 
   const moveCheckedTo = useCallback(async (folderId: string | undefined) => {
     const ids = [...checked]
     if (ids.length === 0) return
+    setBatchAction('move')
     try {
-      await Promise.all(ids.map(id => folderState.moveSession(id, folderId)))
-      setBanner({ text: `已将 ${ids.length} 个会话移至${folderId === undefined ? '未分类' : '目标文件夹'}` })
+      let okCount = 0
+      let failCount = 0
+      const results = await Promise.allSettled(ids.map(id => folderState.moveSession(id, folderId)))
+      for (const result of results) {
+        if (result.status === 'fulfilled') okCount += 1
+        else failCount += 1
+      }
+      if (failCount === 0) flashBanner(`已将 ${okCount} 个会话移至${folderId === undefined ? '未分类' : '目标文件夹'}`)
+      else flashBanner(`移动完成：成功 ${okCount}，失败 ${failCount}`, 'error')
       setChecked(new Set())
     } catch (cause) {
-      setBanner({ text: `批量移动失败：${cause instanceof Error ? cause.message : String(cause)}`, kind: 'error' })
+      flashBanner(`批量移动失败：${cause instanceof Error ? cause.message : String(cause)}`, 'error')
+    } finally {
+      setBatchAction(null)
     }
-    window.clearTimeout(bannerTimer.current)
-    bannerTimer.current = window.setTimeout(() => setBanner(null), 5000)
-  }, [checked, folderState.moveSession])
+  }, [checked, folderState.moveSession, flashBanner])
 
   const [libraryCount, setLibraryCount] = useState<number | null>(null)
   useEffect(() => {
@@ -991,44 +1029,59 @@ export function ArchivePanelView(props: { stores: ArchiveStores; onClose(): void
   const batchDownload = useCallback(async () => {
     setBatchAction('download')
     try {
-      for (const id of checked) await downloadLogZip(id)
-      setBanner({ text: `已开始导出 ${checked.size} 个会话 ZIP` })
-    } catch (cause) {
-      setBanner({ text: `批量导出失败：${cause instanceof Error ? cause.message : String(cause)}`, kind: 'error' })
+      let done = 0
+      for (const id of checked) {
+        try {
+          await downloadLogZip(id)
+          done += 1
+        } catch {
+          // 逐个失败继续；浏览器可能拦截连续下载，见提示
+        }
+      }
+      flashBanner(`已开始导出 ${done} 个会话 ZIP。若浏览器拦截多个下载，请允许一次下载。`)
     } finally {
       setBatchAction(null)
     }
-  }, [checked])
+  }, [checked, flashBanner])
 
   const batchSummarize = useCallback(async () => {
     if (stores.connection === undefined) return
     setBatchAction('summarize')
     try {
-      let done = 0
+      let okCount = 0
+      let failCount = 0
       for (const id of checked) {
-        await readSummaryRpc(stores.connection, id, true).catch(() => null)
-        done += 1
+        try {
+          await readSummaryRpc(stores.connection, id, true)
+          okCount += 1
+        } catch {
+          failCount += 1
+        }
       }
-      setBanner({ text: `已为 ${done} 个会话生成摘要` })
+      if (failCount === 0) flashBanner(`已为 ${okCount} 个会话生成摘要`)
+      else flashBanner(`摘要生成完成：成功 ${okCount}，失败 ${failCount}`, 'error')
     } finally {
       setBatchAction(null)
     }
-  }, [checked, stores.connection])
+  }, [checked, stores.connection, flashBanner])
 
   const batchUnarchive = useCallback(async () => {
     setBatchAction('unarchive')
     try {
-      let done = 0
-      for (const id of checked) {
-        await onUnarchive(id)
-        done += 1
+      let okCount = 0
+      let failCount = 0
+      const results = await Promise.allSettled([...checked].map(id => onUnarchive(id)))
+      for (const result of results) {
+        if (result.status === 'fulfilled') okCount += 1
+        else failCount += 1
       }
-      setBanner({ text: `已恢复 ${done} 个会话` })
+      if (failCount === 0) flashBanner(`已恢复 ${okCount} 个会话`)
+      else flashBanner(`恢复完成：成功 ${okCount}，失败 ${failCount}`, 'error')
       setChecked(new Set())
     } finally {
       setBatchAction(null)
     }
-  }, [checked, onUnarchive])
+  }, [checked, onUnarchive, flashBanner])
 
   useEffect(() => () => { window.clearTimeout(bannerTimer.current) }, [])
 
@@ -1049,6 +1102,7 @@ export function ArchivePanelView(props: { stores: ArchiveStores; onClose(): void
           <FolderTree
             folders={folderState.folders}
             assignment={folderState.assignment}
+            archivedIds={workspaceState.archivedSessionIds}
             totalCount={workspaceState.archivedSessionIds.length}
             bookmarkCount={bookmarkState.bookmarks.filter(entry => entry.bookmarked).length}
             selected={selectedKey}
@@ -1063,7 +1117,7 @@ export function ArchivePanelView(props: { stores: ArchiveStores; onClose(): void
           {isLibrary ? (
             stores.connection === undefined
               ? <div className="dsh-av-empty">connection 服务不可用，无法读取经验库</div>
-              : <KnowledgeLibrary connection={stores.connection} onNotice={(text, kind) => { setBanner({ text, kind }) }} />
+              : <KnowledgeLibrary connection={stores.connection} onNotice={(text, kind) => { flashBanner(text, kind) }} />
           ) : (
             <>
               <div className="dsh-av-note">
@@ -1128,9 +1182,9 @@ export function ArchivePanelView(props: { stores: ArchiveStores; onClose(): void
             {batchAction === 'unarchive' ? '恢复中…' : '恢复会话'}
           </button>
           <div className="dsh-av-batchbar-move">
-            <select className="dsh-av-select" value="" onChange={event => { if (event.target.value !== '') moveCheckedTo(event.target.value) }}>
+            <select className="dsh-av-select" value="" onChange={event => { void moveCheckedTo(event.target.value === '__unclassified__' ? undefined : event.target.value) }}>
               <option value="" disabled>移动到文件夹…</option>
-              <option value="">未分类</option>
+              <option value="__unclassified__">未分类</option>
               {folderState.folders.map(folder => <option key={folder.id} value={folder.id}>{folder.name}</option>)}
             </select>
           </div>
