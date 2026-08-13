@@ -129,11 +129,84 @@ export interface HistoryResponse {
   }
 }
 
-/** connection 服务句柄（ConnectionHandle 结构子集）。 */
+/** connection 服务句柄（ConnectionHandle 结构子集；rpc 为通用 RPC 信道调用）。 */
 export interface ConnectionHandle {
   api: {
     sessions: {
       history(payload: { sessionId: SessionId; beforeSeq?: number; maxMessages?: number }): Promise<HistoryResponse>
     }
   }
+  rpc: {
+    /**
+     * 通用 RPC 调用（client/rpc.ts createWebConnectionRpc 的结构子集）。
+     * @param channel - 逻辑信道（host 注册在 `/rpc`）。
+     * @param endpoint - 端点方法名。
+     * @param payload - 请求负载。
+     * @returns RPC result 信封（ok/value/error 挂在 result 层）。
+     */
+    call(
+      channel: string,
+      endpoint: string,
+      payload?: unknown,
+      signal?: AbortSignal,
+    ): Promise<RpcResult>
+  }
+}
+
+/** RPC result 信封（serverResponseSchema 解析后的 result 层）。 */
+export interface RpcResult {
+  ok: boolean
+  value?: unknown
+  error?: { code: string; message: string }
+}
+
+/** 归档快照（经验库条目；host 侧 ArchiveSnapshot 的 wire 形状）。 */
+export interface ArchiveSnapshot {
+  sessionId: string
+  title: string
+  archivedAt: number
+  summaryMarkdown: string
+  summary: {
+    goal: string
+    decisions: string[]
+    outcomes: string[]
+    lessons: string[]
+    openQuestions: string[]
+  }
+}
+
+/** 归档文件夹（host 侧 ArchiveFolder 的 wire 形状）。 */
+export interface ArchiveFolder {
+  id: string
+  name: string
+}
+
+/** archive.folder.* 系列响应的统一载荷。 */
+export interface FolderPayload {
+  folders: readonly ArchiveFolder[]
+  assignment: Readonly<Record<string, string>>
+  created?: ArchiveFolder
+}
+
+/** 会话行的归档信息（归档面板计算后的展示行）。 */
+export interface ArchiveRowInfo {
+  id: SessionId
+  title: string
+  meta: string
+  updatedAt: number
+  workspace: string | undefined
+}
+
+/** 会话收藏 + 便签（host 侧 BookmarkEntry 的 wire 形状）。 */
+export interface BookmarkEntry {
+  sessionId: string
+  bookmarked: boolean
+  note: string
+  updatedAt: number
+}
+
+/** bookmark.* 系列响应的统一载荷。 */
+export interface BookmarkPayload {
+  bookmarks: readonly BookmarkEntry[]
+  updated?: BookmarkEntry | null
 }
