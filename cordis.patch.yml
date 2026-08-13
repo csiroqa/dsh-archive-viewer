@@ -1,0 +1,10 @@
+# dsh-archive-viewer bundle patch: inserts its plugin row into the profile
+# roster. Install with:
+#   dsh plugin --profile web add link:<this-directory>
+#
+# The single row mounts BOTH halves: the (trivial) host side and the browser
+# side (the archived-session viewer, via the dsh.client declaration in
+# package.json).
+- insert:
+    - id: archive-viewer
+      name: '@dsh-external/dsh-archive-viewer'

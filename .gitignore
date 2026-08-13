@@ -1,0 +1,9 @@
+# Dependencies
+node_modules/
+
+# Build artifacts (rebuild with `pnpm build` after cloning)
+lib/
+
+# Local logs
+*.log
+restart-web*

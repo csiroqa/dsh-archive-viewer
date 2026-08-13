@@ -1,0 +1,196 @@
+diff --git a/packages/host/apiproxy/src/api-proxy.ts b/packages/host/apiproxy/src/api-proxy.ts
+index bda9936..4819ef8 100644
+--- a/packages/host/apiproxy/src/api-proxy.ts
++++ b/packages/host/apiproxy/src/api-proxy.ts
+@@ -2918,6 +2918,12 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
+         }
+         return ok(request, { archivedSessionIds: [...ctx.workspaceRegistry.archivedSessionIds] })
+       },
++
++      async unarchiveSession(request) {
++        const { sessionId } = request.payload
++        await ctx.workspaceRegistry.unarchiveSession(sessionId)
++        return ok(request, { archivedSessionIds: [...ctx.workspaceRegistry.archivedSessionIds] })
++      },
+     },
+ 
+     host: {
+@@ -2938,6 +2944,23 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
+         }))
+       },
+ 
++      async shutdown(request) {
++        // The CLI launcher wires appExit to its bounded shutdown controller
++        // (5s grace, then process exit) — the same path Ctrl+C takes.
++        const exit = ctx.get('appExit') as ((code: number) => void) | undefined
++        if (exit === undefined) {
++          return err(request, {
++            code: 'unavailable',
++            message: 'this host has no exit path wired',
++            details: {},
++          })
++        }
++        // Defer the exit one macrotask so this response flushes before the
++        // tree teardown closes the server.
++        setTimeout(() => { exit(0) }, 100)
++        return ok(request, { shuttingDown: true })
++      },
++
+       async pickDirectory(request, signal) {
+         const capability = ctx.directoryPicker.capability()
+         if (capability.kind !== 'native') {
+diff --git a/packages/host/apiproxy/src/api/host.schema.ts b/packages/host/apiproxy/src/api/host.schema.ts
+index 7dd560d..693dca9 100644
+--- a/packages/host/apiproxy/src/api/host.schema.ts
++++ b/packages/host/apiproxy/src/api/host.schema.ts
+@@ -72,3 +72,11 @@ export const hostOpenPathRequestSchema = z.object({
+ export const hostOpenPathValueSchema = z.object({
+   opened: z.literal(true),
+ }) satisfies z.ZodType<Wire<ResponseValue<'host.openPath'>>>
++
++/** host.shutdown request payload (empty object literal). */
++export const hostShutdownRequestSchema = z.object({}) satisfies z.ZodType<Wire<RequestPayload<'host.shutdown'>>>
++
++/** host.shutdown response value: the exit path was armed. */
++export const hostShutdownValueSchema = z.object({
++  shuttingDown: z.literal(true),
++}) satisfies z.ZodType<Wire<ResponseValue<'host.shutdown'>>>
+diff --git a/packages/host/apiproxy/src/api/host.ts b/packages/host/apiproxy/src/api/host.ts
+index 33c5510..1c9a440 100644
+--- a/packages/host/apiproxy/src/api/host.ts
++++ b/packages/host/apiproxy/src/api/host.ts
+@@ -93,4 +93,13 @@ export interface HostApi {
+     request: RpcRequest<{ path: string }>,
+     signal: AbortSignal,
+   ): Promise<RpcResponse<{ opened: true }>>
++
++  /**
++   * Request a graceful host shutdown, equivalent to SIGINT/Ctrl+C on the
++   * launching terminal: the application tree disposes with the standard grace
++   * period, then the process exits. The response is best-effort — the host may
++   * be gone before it flushes. Served only when the launcher wired an exit
++   * path; otherwise fails with `unavailable`.
++   */
++  shutdown(request: RpcRequest<{}>): Promise<RpcResponse<{ shuttingDown: true }>>
+ }
+diff --git a/packages/host/apiproxy/src/api/rpc-map.ts b/packages/host/apiproxy/src/api/rpc-map.ts
+index 80dede1..596fd2b 100644
+--- a/packages/host/apiproxy/src/api/rpc-map.ts
++++ b/packages/host/apiproxy/src/api/rpc-map.ts
+@@ -43,6 +43,7 @@ export interface RpcMethodMap {
+   'host.listDirectory': HostApi['listDirectory']
+   'host.createDirectory': HostApi['createDirectory']
+   'host.openPath': HostApi['openPath']
++  'host.shutdown': HostApi['shutdown']
+   'workspace.list': WorkspaceApi['list']
+   'workspace.create': WorkspaceApi['create']
+   'workspace.rename': WorkspaceApi['rename']
+@@ -50,6 +51,7 @@ export interface RpcMethodMap {
+   'workspace.insertBefore': WorkspaceApi['insertBefore']
+   'workspace.insertSessionBefore': WorkspaceApi['insertSessionBefore']
+   'workspace.archiveSession': WorkspaceApi['archiveSession']
++  'workspace.unarchiveSession': WorkspaceApi['unarchiveSession']
+   'skill.list': SkillsApi['list']
+   'agentPreset.list': AgentPresetsApi['list']
+   'agentPreset.select': AgentPresetsApi['select']
+diff --git a/packages/host/apiproxy/src/api/workspace.schema.ts b/packages/host/apiproxy/src/api/workspace.schema.ts
+index b573051..0f13968 100644
+--- a/packages/host/apiproxy/src/api/workspace.schema.ts
++++ b/packages/host/apiproxy/src/api/workspace.schema.ts
+@@ -98,3 +98,13 @@ export const workspaceArchiveSessionRequestSchema = z.object({
+ export const workspaceArchiveSessionValueSchema = z.object({
+   archivedSessionIds: z.array(sessionIdSchema),
+ }) satisfies z.ZodType<Wire<ResponseValue<'workspace.archiveSession'>>>
++
++/** workspace.unarchiveSession request payload. */
++export const workspaceUnarchiveSessionRequestSchema = z.object({
++  sessionId: sessionIdSchema,
++}) satisfies z.ZodType<Wire<RequestPayload<'workspace.unarchiveSession'>>>
++
++/** workspace.unarchiveSession response value: the full updated archive set. */
++export const workspaceUnarchiveSessionValueSchema = z.object({
++  archivedSessionIds: z.array(sessionIdSchema),
++}) satisfies z.ZodType<Wire<ResponseValue<'workspace.unarchiveSession'>>>
+diff --git a/packages/host/apiproxy/src/api/workspace.ts b/packages/host/apiproxy/src/api/workspace.ts
+index d36d0c4..702c8bf 100644
+--- a/packages/host/apiproxy/src/api/workspace.ts
++++ b/packages/host/apiproxy/src/api/workspace.ts
+@@ -106,4 +106,13 @@ export interface WorkspaceApi {
+    */
+   archiveSession(request: RpcRequest<{ sessionId: SessionId }>):
+   Promise<RpcResponse<{ archivedSessionIds: SessionId[] }>>
++
++  /**
++   * Removes one session from the registry-global archive set, restoring its
++   * visibility in every grouping surface (its original workspace slot, when
++   * one was kept, returns unchanged). Idempotent for a not-archived id.
++   * Returns the full updated set (same snapshot the changed frame carries).
++   */
++  unarchiveSession(request: RpcRequest<{ sessionId: SessionId }>):
++  Promise<RpcResponse<{ archivedSessionIds: SessionId[] }>>
+ }
+diff --git a/packages/host/apiproxy/src/fetch/handler.ts b/packages/host/apiproxy/src/fetch/handler.ts
+index 697171e..9910729 100644
+--- a/packages/host/apiproxy/src/fetch/handler.ts
++++ b/packages/host/apiproxy/src/fetch/handler.ts
+@@ -31,11 +31,12 @@ import {
+ } from '../api/sessions.schema.ts'
+ import {
+   hostCreateDirectoryRequestSchema, hostDescribeRequestSchema,
+-  hostListDirectoryRequestSchema, hostOpenPathRequestSchema,
++  hostListDirectoryRequestSchema, hostOpenPathRequestSchema, hostShutdownRequestSchema,
+   hostPickDirectoryRequestSchema,
+ } from '../api/host.schema.ts'
+ import {
+   workspaceArchiveSessionRequestSchema,
++  workspaceUnarchiveSessionRequestSchema,
+   workspaceCreateRequestSchema,
+   workspaceDeleteRequestSchema,
+   workspaceInsertBeforeRequestSchema,
+@@ -109,6 +110,7 @@ const UNARY_ROUTES: UnaryRoutes = {
+   'host.listDirectory': { schema: hostListDirectoryRequestSchema, invoke: (api, r, signal) => api.host.listDirectory(r, signal) },
+   'host.createDirectory': { schema: hostCreateDirectoryRequestSchema, invoke: (api, r) => api.host.createDirectory(r) },
+   'host.openPath': { schema: hostOpenPathRequestSchema, invoke: (api, r, signal) => api.host.openPath(r, signal) },
++  'host.shutdown': { schema: hostShutdownRequestSchema, invoke: (api, r) => api.host.shutdown(r) },
+   'workspace.list': { schema: workspaceListRequestSchema, invoke: (api, r) => api.workspace.list(r) },
+   'workspace.create': { schema: workspaceCreateRequestSchema, invoke: (api, r) => api.workspace.create(r) },
+   'workspace.rename': { schema: workspaceRenameRequestSchema, invoke: (api, r) => api.workspace.rename(r) },
+@@ -116,6 +118,7 @@ const UNARY_ROUTES: UnaryRoutes = {
+   'workspace.insertBefore': { schema: workspaceInsertBeforeRequestSchema, invoke: (api, r) => api.workspace.insertBefore(r) },
+   'workspace.insertSessionBefore': { schema: workspaceInsertSessionBeforeRequestSchema, invoke: (api, r) => api.workspace.insertSessionBefore(r) },
+   'workspace.archiveSession': { schema: workspaceArchiveSessionRequestSchema, invoke: (api, r) => api.workspace.archiveSession(r) },
++  'workspace.unarchiveSession': { schema: workspaceUnarchiveSessionRequestSchema, invoke: (api, r) => api.workspace.unarchiveSession(r) },
+   'skill.list': { schema: skillListRequestSchema, invoke: (api, r) => api.skills.list(r) },
+   'agentPreset.list': { schema: agentPresetListRequestSchema, invoke: (api, r) => api.agentPresets.list(r) },
+   'agentPreset.select': { schema: agentPresetSelectRequestSchema, invoke: (api, r) => api.agentPresets.select(r) },
+diff --git a/packages/workspace/workspace/src/index.ts b/packages/workspace/workspace/src/index.ts
+index 87edb28..8fa6d03 100644
+--- a/packages/workspace/workspace/src/index.ts
++++ b/packages/workspace/workspace/src/index.ts
+@@ -254,6 +254,26 @@ export class WorkspaceRegistry extends Service {
+     })
+   }
+ 
++  /**
++   * Unarchive one session durably, restoring its pre-archive visibility in
++   * every grouping surface. Workspace accounting is untouched — the session
++   * keeps its `sessionIds` slot, so its original position returns unchanged.
++   * A not-archived id resolves without writing (idempotent, mirroring
++   * {@link archiveSession}).
++   * @param sessionId - The session to unarchive.
++   * @returns resolution after durability.
++   */
++  unarchiveSession(sessionId: SessionId): Promise<void> {
++    return this.enqueueOperation(async () => {
++      const state = this.requireState()
++      if (!state.archivedSessionIds.includes(sessionId)) return
++      await this.setState({
++        ...state,
++        archivedSessionIds: state.archivedSessionIds.filter(id => id !== sessionId),
++      })
++    })
++  }
++
+   /**
+    * Whether a session is live, header-indexed, or present in a fresh
+    * persistence listing. Only a definite miss returns false — a failing
