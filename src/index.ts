@@ -427,15 +427,20 @@ export interface ArchiveFolder {
   assignment?: Record<string, string>
 }
 
-class FolderStore {
+export class FolderStore {
   private cache: ArchiveFolder[] | null = null
   /** 写队列：串行化 save，避免固定 tmp 名的并发 rename 竞态。 */
   private writeQueue: Promise<void> = Promise.resolve()
+  /** 数据目录（默认 $DSH_HOME/archive_snapshots；测试可注入临时目录）。 */
+  private readonly dir: string
+
+  constructor(dir?: string) {
+    this.dir = dir ?? snapshotDir()
+  }
 
   private async file(): Promise<string> {
-    const dir = snapshotDir()
-    await mkdir(dir, { recursive: true })
-    return join(dir, FOLDERS_FILE)
+    await mkdir(this.dir, { recursive: true })
+    return join(this.dir, FOLDERS_FILE)
   }
 
   async load(): Promise<ArchiveFolder[]> {
@@ -552,15 +557,20 @@ export interface BookmarkEntry {
   updatedAt: number
 }
 
-class BookmarkStore {
+export class BookmarkStore {
   private cache: Record<string, BookmarkEntry> | null = null
   /** 写队列：串行化 save，避免固定 tmp 名的并发 rename 竞态。 */
   private writeQueue: Promise<void> = Promise.resolve()
+  /** 数据目录（默认 $DSH_HOME/archive_snapshots；测试可注入临时目录）。 */
+  private readonly dir: string
+
+  constructor(dir?: string) {
+    this.dir = dir ?? snapshotDir()
+  }
 
   private async file(): Promise<string> {
-    const dir = snapshotDir()
-    await mkdir(dir, { recursive: true })
-    return join(dir, BOOKMARKS_FILE)
+    await mkdir(this.dir, { recursive: true })
+    return join(this.dir, BOOKMARKS_FILE)
   }
 
   async load(): Promise<Record<string, BookmarkEntry>> {
