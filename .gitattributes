@@ -1,0 +1,2 @@
+# 补丁文件必须 LF 行尾，否则 `git apply` 在 LF 检出上必然失败。
+patches/** text eol=lf
