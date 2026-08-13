@@ -44,7 +44,7 @@ export function ShutdownButton(): JSX.Element {
 
   const onShutdown = async (): Promise<void> => {
     if (shuttingDown) return
-    if (!window.confirm('确定要关闭 dsh 吗？\n\n所有会话日志均已持久化，重启后原样恢复。')) return
+    if (!window.confirm('确定要关闭 dsh 吗？\n\n对话记录都会保存，重启后原样恢复。')) return
     setShuttingDown(true)
     try {
       await shutdownRpc()

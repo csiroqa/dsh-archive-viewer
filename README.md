@@ -28,7 +28,7 @@ English: [README.en.md](README.en.md)
 
 ### 其他
 
-- **右上角「关闭 dsh」按钮**：确认后优雅关机（等价于 Ctrl+C，5 秒宽限收尾）
+- **右上角「关闭 dsh」按钮**：会话完成后可一键关闭 dsh，日志均已保存，重启后原样恢复
 - **皮肤全适配**：全部使用 shell 设计令牌（`--dsw-alias-*` + `--dsw-alias-state-business-primary` 强调色），自动跟随任意皮肤；面板 Portal 到 `document.body` 避开侧边栏令牌覆盖
 
 ## 配置
