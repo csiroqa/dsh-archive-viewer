@@ -98,7 +98,7 @@ dsh plugin --profile web add link:E:\path\to\dsh-archive-viewer   # Windows
 ## 兼容性
 
 - **平台**：Windows / macOS / Linux（Node >= 22）
-- 针对 DSH `0.1.0-rc.5` 源码检出开发验证
+- 针对 DSH `0.1.1-rc.2` 源码检出开发验证（含本地归档/关闭核心补丁）
 - 客户端零框架类型依赖：不 import 任何 `@deepseek-ai/*` 值，全部结构类型，不随 DSH SDK 版本漂移
 - 构建产物：`tsdown`（host 半区 `lib/index.js` + browser 半区 `lib/client.js`，标准 `window.__ModuleLoader__.load` 闭包工厂格式）
 

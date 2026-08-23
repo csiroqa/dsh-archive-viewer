@@ -55,7 +55,7 @@ Restart `dsh web` and hard-refresh (Ctrl+F5).
 
 ## Compatibility
 
-- Developed and verified against a DSH `0.1.0-rc.5` source checkout
+- Developed and verified against a DSH `0.1.1-rc.2` source checkout (including the local archive/shutdown core patches)
 - Zero framework type dependencies: no `@deepseek-ai/*` value imports, structural types only — no drift with DSH SDK versions
 - Build: `tsdown` (host half `lib/index.js` + browser half `lib/client.js`, standard `window.__ModuleLoader__.load` closure-factory format)
 
